@@ -19,7 +19,7 @@ use pipeline::Cfg;
 struct Args {
     /// Twitch channel login
     #[arg(long, env = "TWITCH_CHANNEL")]
-    channel: String,
+    channel: Option<String>,
     /// Folder holding your OBS recordings (matched to clips by start time)
     #[arg(long, env = "RECORDINGS_DIR")]
     recordings: Option<String>,
@@ -36,9 +36,9 @@ struct Args {
     #[arg(long)]
     run: bool,
     #[arg(long, env = "TWITCH_CLIENT_ID")]
-    client_id: String,
+    client_id: Option<String>,
     #[arg(long, env = "TWITCH_CLIENT_SECRET")]
-    client_secret: String,
+    client_secret: Option<String>,
     /// Firebase RTDB base URL (reads the clipSync clapperboard anchors)
     #[arg(long, env = "FIREBASE_DATABASE_URL")]
     firebase_url: Option<String>,
@@ -72,7 +72,13 @@ impl Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv().ok(); // .env in the working dir
+    // …and a .env sitting next to the exe (installed builds run from Program Files).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = dotenvy::from_path(dir.join(".env"));
+        }
+    }
     let args = Args::parse();
     let cfg = args.cfg();
     match args.command {
@@ -96,7 +102,7 @@ async fn run_cli(cfg: Cfg, run: bool) -> Result<()> {
 
     let rows = pipeline::plan_rows(&cfg).await?;
     let ready = rows.iter().filter(|r| r.status == "ready").count();
-    eprintln!("\n{} — {} clips ≤60s · mode {}\n", cfg.channel, rows.len(), if run { "RUN" } else { "DRY-RUN" });
+    eprintln!("\n{} — {} clips ≤60s · mode {}\n", cfg.channel.as_deref().unwrap_or("(no channel)"), rows.len(), if run { "RUN" } else { "DRY-RUN" });
 
     for r in &rows {
         println!("• {}  [{:.0}s]  {}", trunc(&r.title, 48), r.duration, r.url);

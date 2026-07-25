@@ -12,14 +12,29 @@ use crate::twitch::{ClipDto, Twitch};
 /// Everything the pipeline needs; built from CLI args or the server config.
 #[derive(Clone)]
 pub struct Cfg {
-    pub channel: String,
-    pub client_id: String,
-    pub client_secret: String,
+    pub channel: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
     pub recordings: Option<String>,
     pub days: i64,
     pub pad: f64,
     pub out_dir: String,
     pub firebase_url: Option<String>,
+}
+
+impl Cfg {
+    /// (client_id, client_secret, channel), or an error naming what's unset — so
+    /// the portal can launch unconfigured and surface a clear message.
+    fn creds(&self) -> Result<(&str, &str, &str)> {
+        let mut missing = Vec::new();
+        if self.client_id.is_none() { missing.push("TWITCH_CLIENT_ID"); }
+        if self.client_secret.is_none() { missing.push("TWITCH_CLIENT_SECRET"); }
+        if self.channel.is_none() { missing.push("TWITCH_CHANNEL"); }
+        if !missing.is_empty() {
+            anyhow::bail!("not configured — set {} (in a .env next to the app, or via flags)", missing.join(", "));
+        }
+        Ok((self.client_id.as_deref().unwrap(), self.client_secret.as_deref().unwrap(), self.channel.as_deref().unwrap()))
+    }
 }
 
 /// One clip's plan, JSON-serialized for the web UI.
@@ -41,8 +56,9 @@ pub struct PlanRow {
 
 /// Fetch + plan every ≤60s clip for the channel.
 pub async fn plan_rows(cfg: &Cfg) -> Result<Vec<PlanRow>> {
-    let tw = Twitch::app_token(&cfg.client_id, &cfg.client_secret).await?;
-    let broadcaster_id = tw.user_id(&cfg.channel).await?;
+    let (client_id, client_secret, channel) = cfg.creds()?;
+    let tw = Twitch::app_token(client_id, client_secret).await?;
+    let broadcaster_id = tw.user_id(channel).await?;
 
     let now = chrono::Utc::now();
     let started_at = (now - chrono::Duration::days(cfg.days)).to_rfc3339();

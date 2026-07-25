@@ -1,7 +1,8 @@
 name: release
 
-# Push a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`) → this
-# builds the Windows .exe on a Windows runner and attaches it to a GitHub Release.
+# Push a version tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`) → build the
+# self-contained Windows app (UI embedded, ffmpeg bundled) and publish a zip + an
+# installer to a GitHub Release.
 on:
   push:
     tags: ['v*']
@@ -14,24 +15,61 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the React UI (embedded into the exe)
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
       - uses: dtolnay/rust-toolchain@stable
       - name: Install NASM (needed to build aws-lc-rs / rustls on Windows)
         uses: ilammy/setup-nasm@v1
-      - name: Build release
+      - name: Build release exe
         run: cargo build --release --locked
-      - name: Test
-        run: cargo test --release --locked
+
+      - name: Fetch static ffmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_src -Force
+          $ff  = Get-ChildItem -Recurse ffmpeg_src -Filter ffmpeg.exe | Select-Object -First 1
+          $lic = Get-ChildItem -Recurse ffmpeg_src -Filter LICENSE* | Select-Object -First 1
+          New-Item -ItemType Directory -Force staging | Out-Null
+          Copy-Item $ff.FullName  staging\ffmpeg.exe
+          Copy-Item $lic.FullName staging\FFMPEG-LICENSE.txt
+
+      - name: Stage app files + zip
+        shell: pwsh
+        run: |
+          Copy-Item target\release\okra-clip-archiver.exe staging\
+          Copy-Item README.md      staging\
+          Copy-Item .env.example   staging\
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path staging\* -DestinationPath "dist\okra-clip-archiver-${{ github.ref_name }}-windows.zip" -Force
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${Env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ github.ref_name }} installer.iss
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/okra-clip-archiver.exe
+          files: |
+            dist/okra-clip-archiver-*-windows.zip
+            dist/okra-clip-archiver-setup.exe
           body: |
-            **okra-clip-archiver ${{ github.ref_name }}** (Windows x64).
+            **okra-clip-archiver ${{ github.ref_name }}** (Windows x64) — self-contained.
 
-            Requires **ffmpeg** on PATH (or drop `ffmpeg.exe` next to this tool).
+            - **Installer:** `okra-clip-archiver-setup.exe` (bundles ffmpeg; adds a Start-Menu/desktop shortcut).
+            - **Portable:** the `-windows.zip` (unzip and run `okra-clip-archiver.exe serve`).
 
-            ```
-            okra-clip-archiver.exe --channel <login> --recordings "C:\path\to\obs\videos" --run
-            ```
-            Config via flags or a `.env` next to the exe: `TWITCH_CLIENT_ID`,
-            `TWITCH_CLIENT_SECRET`, `TWITCH_CHANNEL`, `RECORDINGS_DIR`.
+            Config: copy `.env.example` to `.env` in the install folder and fill in your
+            Twitch `CLIENT_ID`/`CLIENT_SECRET`/`CHANNEL` + `RECORDINGS_DIR`. Launch → the
+            portal opens in your browser.
+
+            ffmpeg is bundled under GPL (`FFMPEG-LICENSE.txt`); the app itself is MIT.
