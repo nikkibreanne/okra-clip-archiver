@@ -86,9 +86,8 @@ pub struct Fetched {
 }
 
 pub async fn fetch(s: &Settings) -> Result<Fetched> {
-    let (client_id, client_secret, channel) = s.twitch_creds()?;
-    let tw = Twitch::app_token(client_id, client_secret).await?;
-    let broadcaster_id = tw.user_id(channel).await?;
+    let tw = Twitch::from_settings(s).await?;
+    let broadcaster_id = tw.user_id(&s.twitch_channel).await?;
 
     let now = chrono::Utc::now();
     let started_at = (now - chrono::Duration::days(s.days)).to_rfc3339();

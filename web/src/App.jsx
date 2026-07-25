@@ -131,7 +131,7 @@ export default function App() {
       {tab === 'mapping' && <Mapping onChanged={refreshAll} onGoSettings={() => setTab('settings')} />}
       {tab === 'layout' && <LayoutEditor clips={clips} onGoSettings={() => setTab('settings')} />}
       {tab === 'uploads' && <Uploads status={status} onGoSettings={() => setTab('settings')} />}
-      {tab === 'settings' && <Settings onSaved={refreshAll} />}
+      {tab === 'settings' && <Settings onSaved={refreshAll} status={status} />}
     </div>
   );
 }

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { SECTIONS } from './schema.js';
+import TwitchAuth from './TwitchAuth.jsx';
 
-export default function Settings({ onSaved }) {
+export default function Settings({ onSaved, status }) {
   const [values, setValues] = useState(null);
   const [path, setPath] = useState('');
   const [dirty, setDirty] = useState(false);
@@ -94,6 +95,8 @@ export default function Settings({ onSaved }) {
         </button>
       </div>
 
+      <TwitchAuth status={status} onChanged={() => { load(); onSaved?.(); }} />
+
       {SECTIONS.map((section) => (
         <section className="panel" key={section.id}>
           <h2>{section.title}</h2>
@@ -125,7 +128,7 @@ function Field({ f, value, onChange }) {
 
   return (
     <div className={`field ${f.type === 'textarea' ? 'wide' : ''}`}>
-      <label htmlFor={id}>{f.label}</label>
+      <label htmlFor={id} title={f.hint || f.label}>{f.label}</label>
       {f.type === 'select' ? (
         <select {...common}>
           {f.options.map((o) => (

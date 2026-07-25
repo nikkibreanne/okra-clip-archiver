@@ -27,6 +27,8 @@ pub const MASK: &str = "••••••••";
 /// Fields whose values are never sent to the browser in the clear.
 pub const SECRET_FIELDS: &[&str] = &[
     "twitch_client_secret",
+    "twitch_access_token",
+    "twitch_refresh_token",
     "youtube_client_secret",
     "youtube_refresh_token",
     "tiktok_client_secret",
@@ -40,6 +42,10 @@ pub const FIELDS: &[(&str, &str)] = &[
     ("twitch_client_id", "TWITCH_CLIENT_ID"),
     ("twitch_client_secret", "TWITCH_CLIENT_SECRET"),
     ("twitch_channel", "TWITCH_CHANNEL"),
+    // Filled in by "Sign in with Twitch" (device flow) — not hand-edited.
+    ("twitch_access_token", "TWITCH_ACCESS_TOKEN"),
+    ("twitch_refresh_token", "TWITCH_REFRESH_TOKEN"),
+    ("twitch_user_login", "TWITCH_USER_LOGIN"),
     // Local files + selection.
     ("recordings_dir", "RECORDINGS_DIR"),
     ("out_dir", "OUT_DIR"),
@@ -78,8 +84,13 @@ pub struct Settings {
     // ── Twitch (clip source) ──
     pub twitch_client_id: String,
     pub twitch_client_secret: String,
-    /// Channel login to pull clips FROM. Never defaulted to anyone's channel.
+    /// Channel login to pull clips FROM. Defaults to the signed-in user's own
+    /// channel, but stays editable (editors/mods archive someone else's).
     pub twitch_channel: String,
+    pub twitch_access_token: String,
+    pub twitch_refresh_token: String,
+    /// Login of whoever signed in — shown in the UI, not a credential.
+    pub twitch_user_login: String,
 
     // ── Local files + selection ──
     pub recordings_dir: String,
@@ -121,9 +132,12 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            twitch_client_id: String::new(),
+            twitch_client_id: crate::auth::default_client_id(),
             twitch_client_secret: String::new(),
             twitch_channel: String::new(),
+            twitch_access_token: String::new(),
+            twitch_refresh_token: String::new(),
+            twitch_user_login: String::new(),
             recordings_dir: String::new(),
             out_dir: "out".into(),
             days: 30,
@@ -171,17 +185,25 @@ impl Settings {
         serde_json::from_value(Value::Object(map)).unwrap_or_default()
     }
 
-    /// (client_id, client_secret, channel) or an error naming what's still unset,
-    /// so the portal can run unconfigured and show an actionable message.
-    pub fn twitch_creds(&self) -> Result<(&str, &str, &str)> {
-        let mut missing = Vec::new();
-        if self.twitch_client_id.trim().is_empty() { missing.push("Twitch client ID"); }
-        if self.twitch_client_secret.trim().is_empty() { missing.push("Twitch client secret"); }
-        if self.twitch_channel.trim().is_empty() { missing.push("Twitch channel"); }
-        if !missing.is_empty() {
-            anyhow::bail!("not configured — set {} on the Settings page", missing.join(", "));
+    /// True once we can talk to Twitch: either the user signed in (device flow)
+    /// or a client id + secret is configured for an app token.
+    pub fn has_twitch_auth(&self) -> bool {
+        !self.twitch_client_id.trim().is_empty()
+            && (!self.twitch_access_token.trim().is_empty() || !self.twitch_client_secret.trim().is_empty())
+    }
+
+    /// What's still missing before clips can load, in user-facing words.
+    pub fn twitch_ready(&self) -> Result<()> {
+        if self.twitch_client_id.trim().is_empty() {
+            anyhow::bail!("not configured — no Twitch application is set up (Settings → Twitch)");
         }
-        Ok((&self.twitch_client_id, &self.twitch_client_secret, &self.twitch_channel))
+        if !self.has_twitch_auth() {
+            anyhow::bail!("not configured — sign in with Twitch on the Settings page");
+        }
+        if self.twitch_channel.trim().is_empty() {
+            anyhow::bail!("not configured — choose which channel to pull clips from (Settings → Twitch)");
+        }
+        Ok(())
     }
 
     /// The same values as `.env` key/value pairs.

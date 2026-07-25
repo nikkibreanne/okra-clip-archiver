@@ -6,11 +6,22 @@ export const SECTIONS = [
     id: 'twitch',
     title: 'Twitch — where clips come from',
     blurb:
-      'Create an app at dev.twitch.tv/console/apps to get the ID and secret. The channel is the source of clips — set it to whichever channel you are archiving.',
+      'Signing in above is all most people need. The channel is the SOURCE of clips — it defaults to your own, but you can point it at any channel you help run. The ID/secret below are only for advanced setups (a custom Twitch app, or running without signing in).',
     fields: [
-      { key: 'twitch_channel', label: 'Channel login', type: 'text', placeholder: 'e.g. scasplte2', hint: 'The part after twitch.tv/ — no @.' },
-      { key: 'twitch_client_id', label: 'Client ID', type: 'text' },
-      { key: 'twitch_client_secret', label: 'Client secret', type: 'password' },
+      {
+        key: 'twitch_channel',
+        label: 'Channel to archive',
+        type: 'text',
+        placeholder: 'e.g. scasplte2',
+        hint: 'The part after twitch.tv/ — no @. Defaults to your own channel when you sign in.',
+      },
+      { key: 'twitch_client_id', label: 'Client ID (advanced)', type: 'text', hint: 'Only needed for a custom Twitch application.' },
+      {
+        key: 'twitch_client_secret',
+        label: 'Client secret (advanced)',
+        type: 'password',
+        hint: 'Not required when signed in — only for unattended/app-token use.',
+      },
     ],
   },
   {

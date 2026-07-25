@@ -43,6 +43,11 @@ pub async fn serve(port: u16) -> Result<()> {
         .route("/api/recordings", get(recordings))
         .route("/api/mapping", post(post_mapping))
         .route("/api/preview", get(preview))
+        .route("/api/jobs", get(jobs_list).delete(jobs_clear))
+        .route("/api/jobs/cancel", post(jobs_cancel))
+        .route("/api/auth/twitch/start", post(auth_start))
+        .route("/api/auth/twitch/poll", post(auth_poll))
+        .route("/api/auth/twitch/signout", post(auth_signout))
         .fallback(static_handler);
 
     // Bind the first free port from `port` so a second launch doesn't just fail.
@@ -89,8 +94,10 @@ async fn status() -> Json<Value> {
     let recordings = pipeline::scan_recordings(&s.recordings_dir);
     Json(json!({
         "channel": s.twitch_channel,
-        "configured": s.twitch_creds().is_ok(),
-        "missing": s.twitch_creds().err().map(|e| e.to_string()),
+        "configured": s.twitch_ready().is_ok(),
+        "missing": s.twitch_ready().err().map(|e| e.to_string()),
+        "signed_in_as": s.twitch_user_login,
+        "has_client_id": !s.twitch_client_id.trim().is_empty(),
         "recordings_dir": s.recordings_dir,
         "recordings_found": recordings.len(),
         "out_dir": s.out_dir,
@@ -118,11 +125,98 @@ struct IdReq {
     id: String,
 }
 
-async fn render(Json(req): Json<IdReq>) -> Result<Json<Value>, ApiError> {
+/// Queue one or more renders. Returns immediately — watch /api/jobs for progress.
+#[derive(Deserialize)]
+struct RenderReq {
+    #[serde(default)]
+    id: Option<String>,
+    /// Queue every ready clip instead of a single id.
+    #[serde(default)]
+    all: bool,
+}
+
+async fn render(Json(req): Json<RenderReq>) -> Result<Json<Value>, ApiError> {
     let rows = pipeline::plan_rows(&settings::get()).await?;
-    let row = rows.into_iter().find(|r| r.id == req.id).ok_or_else(|| anyhow::anyhow!("clip not found"))?;
-    pipeline::render(&row).await?;
-    Ok(Json(json!({ "ok": true, "out": row.out_path })))
+    let targets: Vec<_> = if req.all {
+        rows.iter().filter(|r| r.status == "ready").collect()
+    } else {
+        let id = req.id.clone().ok_or_else(|| anyhow::anyhow!("no clip specified"))?;
+        rows.iter().filter(|r| r.id == id).collect()
+    };
+    if targets.is_empty() {
+        return Err(anyhow::anyhow!("nothing to render").into());
+    }
+
+    let mut queued = 0;
+    for row in targets {
+        let (Some(cmd), Some(out)) = (row.ffmpeg.clone(), row.out_path.clone()) else { continue };
+        let total = (row.out_sec.unwrap_or(0.0) - row.in_sec.unwrap_or(0.0)).max(0.1);
+        let title = if row.title.is_empty() { row.id.clone() } else { row.title.clone() };
+        // Already-queued clips are skipped rather than failing the whole batch.
+        if crate::jobs::enqueue(row.id.clone(), title, total, cmd, out).is_ok() {
+            queued += 1;
+        }
+    }
+    Ok(Json(json!({ "ok": true, "queued": queued })))
+}
+
+async fn jobs_list() -> Json<Value> {
+    Json(json!({ "jobs": crate::jobs::snapshot() }))
+}
+
+async fn jobs_cancel(Json(req): Json<IdReq>) -> Result<Json<Value>, ApiError> {
+    crate::jobs::cancel(&req.id)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn jobs_clear() -> Json<Value> {
+    crate::jobs::clear_finished();
+    Json(json!({ "ok": true }))
+}
+
+/// Begin "Sign in with Twitch" — the UI shows the code and opens the URL.
+async fn auth_start() -> Result<Json<Value>, ApiError> {
+    let s = settings::get();
+    let d = crate::auth::start_device(&s.twitch_client_id).await?;
+    let _ = open::that(&d.verification_uri);
+    Ok(Json(serde_json::to_value(d)?))
+}
+
+#[derive(Deserialize)]
+struct PollReq {
+    device_code: String,
+}
+
+/// One poll of the device flow. `pending: true` means keep polling.
+async fn auth_poll(Json(req): Json<PollReq>) -> Result<Json<Value>, ApiError> {
+    let s = settings::get();
+    let Some(tok) = crate::auth::poll_device(&s.twitch_client_id, &req.device_code).await? else {
+        return Ok(Json(json!({ "pending": true })));
+    };
+
+    // Identify the user so we can default the channel to their own.
+    let tw = crate::twitch::Twitch::with_token(&s.twitch_client_id, &tok.access_token);
+    let (_, login) = tw.current_user().await?;
+
+    let mut patch = json!({
+        "twitch_access_token": tok.access_token,
+        "twitch_refresh_token": tok.refresh_token,
+        "twitch_user_login": login,
+    });
+    if s.twitch_channel.trim().is_empty() {
+        patch["twitch_channel"] = json!(login);
+    }
+    settings::update(&patch)?;
+    Ok(Json(json!({ "ok": true, "login": login, "channel": settings::get().twitch_channel })))
+}
+
+async fn auth_signout() -> Result<Json<Value>, ApiError> {
+    settings::update(&json!({
+        "twitch_access_token": "",
+        "twitch_refresh_token": "",
+        "twitch_user_login": "",
+    }))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn get_settings() -> Json<Value> {
@@ -145,12 +239,10 @@ async fn post_settings(Json(patch): Json<Value>) -> Result<Json<Value>, ApiError
 /// Verify the saved Twitch app credentials and channel resolve.
 async fn test_twitch() -> Result<Json<Value>, ApiError> {
     let s = settings::get();
-    let (id, secret, channel) = s.twitch_creds()?;
-    let tw = crate::twitch::Twitch::app_token(id, secret)
-        .await
-        .map_err(|e| anyhow::anyhow!("credentials rejected by Twitch: {e}"))?;
+    let channel = s.twitch_channel.clone();
+    let tw = crate::twitch::Twitch::from_settings(&s).await?;
     let user = tw
-        .user_id(channel)
+        .user_id(&channel)
         .await
         .map_err(|_| anyhow::anyhow!("channel '{channel}' not found on Twitch"))?;
     Ok(Json(json!({ "ok": true, "message": format!("connected — '{channel}' resolved (id {user})") })))
@@ -265,6 +357,12 @@ struct ApiError(anyhow::Error);
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         ApiError(e)
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        ApiError(e.into())
     }
 }
 

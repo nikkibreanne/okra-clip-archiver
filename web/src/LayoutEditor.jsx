@@ -2,9 +2,24 @@ import { useEffect, useRef, useState } from 'react';
 
 const OUT_W = 1080;
 const OUT_H = 1920;
+// Each box fills HALF the 9:16 output, so a box that is 1080x960 (9:8) maps in
+// with no stretching. Locking to this is the sane default; unlocking lets you
+// crop a different shape and accept that it gets squeezed to fit.
+const HALF_ASPECT = OUT_W / (OUT_H / 2); // 1.125
 
 function defaultBoxes(w, h) {
   return { top: { x: 0, y: 0, w, h: h / 2 }, bottom: { x: 0, y: h / 2, w, h: h / 2 } };
+}
+
+/** Aspect-correct a box against a known display size (used before state exists). */
+function clampTo(b, d) {
+  let w = Math.min(b.w, d.w);
+  let h = w / HALF_ASPECT;
+  if (h > d.h) {
+    h = d.h;
+    w = h * HALF_ASPECT;
+  }
+  return { x: Math.max(0, Math.min(b.x, d.w - w)), y: Math.max(0, Math.min(b.y, d.h - h)), w, h };
 }
 
 /**
@@ -22,6 +37,7 @@ export default function LayoutEditor({ clips, onGoSettings }) {
   const [frameId, setFrameId] = useState('');
   const [note, setNote] = useState(null);
   const [frameState, setFrameState] = useState('loading'); // loading | ok | error
+  const [locked, setLocked] = useState(true);
 
   const readyClips = (clips || []).filter((c) => c.status === 'ready');
 
@@ -48,18 +64,41 @@ export default function LayoutEditor({ clips, onGoSettings }) {
     const d = { w: img.offsetWidth, h: img.offsetHeight };
     setDisplay(d);
     setNatural({ w: img.naturalWidth, h: img.naturalHeight });
-    setBoxes((b) => b || defaultBoxes(d.w, d.h));
+    setBoxes((b) => {
+      if (b) return b;
+      const init = defaultBoxes(d.w, d.h);
+      return locked
+        ? { top: clampTo(init.top, d), bottom: clampTo(init.bottom, d) }
+        : init;
+    });
     setFrameState('ok');
   }
 
-  function clamp(box) {
+  /** Keep a box on-screen; when locked, hold it at the 9:8 half-frame aspect. */
+  function clamp(box, keepAspect = locked) {
     if (!display) return box;
     let { x, y, w, h } = box;
     w = Math.max(24, Math.min(w, display.w));
     h = Math.max(24, Math.min(h, display.h));
+    if (keepAspect) {
+      // Width leads; if that makes the box taller than the frame, height leads.
+      h = w / HALF_ASPECT;
+      if (h > display.h) {
+        h = display.h;
+        w = h * HALF_ASPECT;
+      }
+    }
     x = Math.max(0, Math.min(x, display.w - w));
     y = Math.max(0, Math.min(y, display.h - h));
     return { x, y, w, h };
+  }
+
+  /** Re-apply the lock to both boxes (used when the toggle is switched on). */
+  function relock(on) {
+    setLocked(on);
+    if (on && boxes) {
+      setBoxes({ top: clamp(boxes.top, true), bottom: clamp(boxes.bottom, true) });
+    }
   }
 
   function startDrag(e, which, mode) {
@@ -146,7 +185,11 @@ export default function LayoutEditor({ clips, onGoSettings }) {
             output, the <b>bottom</b> box the lower half. Set it once — every render reuses it.
           </p>
         </div>
-        <button className="ghost" onClick={reset}>Reset</button>
+        <label className="lock" title="Keep each box at the shape of half a 9:16 video, so nothing is stretched when it is stacked.">
+          <input type="checkbox" checked={locked} onChange={(e) => relock(e.target.checked)} />
+          <span>Lock to 9:16</span>
+        </label>
+        <button className="ghost" onClick={reset} title="Forget this layout and go back to the default widescreen fit">Reset</button>
         <button onClick={save} disabled={frameState !== 'ok'}>Save layout</button>
       </div>
 
@@ -211,8 +254,10 @@ export default function LayoutEditor({ clips, onGoSettings }) {
                 <span className="mono tiny">
                   {Math.round(b.w * sx)}×{Math.round(b.h * sy)} at {Math.round(b.x * sx)},{Math.round(b.y * sy)} (source px)
                 </span>
-                <button className="tiny-btn" onClick={() => nudge(which, { x: 0, w: display.w })}>full width</button>
-                <button className="tiny-btn" onClick={() => nudge(which, { h: display.h / 2 })}>half height</button>
+                <button className="tiny-btn" onClick={() => nudge(which, { x: 0, w: display.w })} title="Span the full width of the frame">full width</button>
+                {!locked && (
+                  <button className="tiny-btn" onClick={() => nudge(which, { h: display.h / 2 })} title="Set this box to half the frame height">half height</button>
+                )}
               </div>
             );
           })}

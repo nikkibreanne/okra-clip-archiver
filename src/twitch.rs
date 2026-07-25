@@ -26,6 +26,64 @@ pub struct ClipDto {
 }
 
 impl Twitch {
+    /// Build from the saved settings: prefer the signed-in USER token (device
+    /// flow, no secret needed); fall back to a client-credentials app token when
+    /// only an id+secret are configured. Refreshes the user token once if Twitch
+    /// says it's stale, persisting the rotated refresh token.
+    pub async fn from_settings(s: &crate::settings::Settings) -> Result<Self> {
+        s.twitch_ready()?;
+        if !s.twitch_access_token.trim().is_empty() {
+            let me = Self {
+                client: reqwest::Client::new(),
+                client_id: s.twitch_client_id.clone(),
+                token: s.twitch_access_token.clone(),
+            };
+            // Cheap liveness probe; on 401 refresh and retry once.
+            if me.validate().await.is_ok() {
+                return Ok(me);
+            }
+            if !s.twitch_refresh_token.trim().is_empty() {
+                let t = crate::auth::refresh(&s.twitch_client_id, &s.twitch_refresh_token).await?;
+                crate::settings::update(&serde_json::json!({
+                    "twitch_access_token": t.access_token,
+                    "twitch_refresh_token": t.refresh_token,
+                }))?;
+                return Ok(Self {
+                    client: reqwest::Client::new(),
+                    client_id: s.twitch_client_id.clone(),
+                    token: crate::settings::get().twitch_access_token,
+                });
+            }
+            anyhow::bail!("your Twitch sign-in expired — sign in again on the Settings page");
+        }
+        Self::app_token(&s.twitch_client_id, &s.twitch_client_secret).await
+    }
+
+    /// Wrap an already-obtained user token (used right after sign-in).
+    pub fn with_token(client_id: &str, token: &str) -> Self {
+        Self { client: reqwest::Client::new(), client_id: client_id.to_string(), token: token.to_string() }
+    }
+
+    /// Confirm the token is still accepted.
+    async fn validate(&self) -> Result<()> {
+        let res = self
+            .client
+            .get("https://id.twitch.tv/oauth2/validate")
+            .header("Authorization", format!("OAuth {}", self.token))
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "token rejected");
+        Ok(())
+    }
+
+    /// The login of whoever this (user) token belongs to.
+    pub async fn current_user(&self) -> Result<(String, String)> {
+        #[derive(Deserialize)] struct U { id: String, login: String }
+        #[derive(Deserialize)] struct R { data: Vec<U> }
+        let r: R = self.get("https://api.twitch.tv/helix/users", &[]).await?;
+        r.data.into_iter().next().map(|u| (u.id, u.login)).context("no user for this token")
+    }
+
     /// Client-credentials app token (Get Clips / Get Videos / Get Users are public).
     pub async fn app_token(client_id: &str, client_secret: &str) -> Result<Self> {
         #[derive(Deserialize)]

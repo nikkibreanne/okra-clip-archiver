@@ -1,11 +1,19 @@
 import { useMemo, useState } from 'react';
 import ClipPreview from './ClipPreview.jsx';
+import Jobs from './Jobs.jsx';
 
 const LABEL = {
   ready: 'Ready',
   'no-recording': 'Not mapped',
   unmappable: 'Waiting on VOD',
   skip: 'Too long',
+};
+
+const TIP = {
+  ready: 'Mapped to a local recording — this can be cut at full quality right now.',
+  'no-recording': 'No local recording is mapped to this clip’s broadcast. Fix it on the VOD mapping tab.',
+  unmappable: 'Twitch hasn’t published this clip’s position in the VOD yet. It appears a few minutes after the clip is made, and needs “Store past broadcasts” enabled.',
+  skip: 'Longer than the max clip length in Settings.',
 };
 
 const FILTERS = [
@@ -16,7 +24,7 @@ const FILTERS = [
 
 export default function Clips({ clips, error, loading, onRefresh, onGoSettings, onGoMapping, previewId, onPreview }) {
   const [filter, setFilter] = useState('all');
-  const [busy, setBusy] = useState({});
+  const [queueErr, setErr] = useState(null);
 
   const counts = useMemo(() => {
     const c = { total: 0, ready: 0, rendered: 0, 'no-recording': 0, unmappable: 0, skip: 0 };
@@ -35,29 +43,22 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings, 
     return clips;
   }, [clips, filter]);
 
-  async function render(id) {
-    setBusy((b) => ({ ...b, [id]: { state: 'run' } }));
+  // Renders are queued server-side (one at a time) and tracked by <Jobs/>.
+  async function queue(body) {
+    setErr(null);
     try {
       const res = await fetch('/api/render', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify(body),
       });
-      const text = await res.text();
-      if (!res.ok) throw new Error(text);
-      setBusy((b) => ({ ...b, [id]: { state: 'done' } }));
+      if (!res.ok) throw new Error(await res.text());
     } catch (e) {
-      setBusy((b) => ({ ...b, [id]: { state: 'err', msg: String(e.message || e) } }));
+      setErr(String(e.message || e));
     }
   }
-
-  async function renderAll() {
-    for (const c of shown.filter((x) => x.status === 'ready')) {
-      // Sequential on purpose — parallel ffmpeg runs would thrash the disk/CPU.
-      // eslint-disable-next-line no-await-in-loop
-      await render(c.id);
-    }
-  }
+  const render = (id) => queue({ id });
+  const renderAll = () => queue({ all: true });
 
   if (loading) return <div className="panel"><p className="muted">Loading clips from Twitch…</p></div>;
 
@@ -116,9 +117,12 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings, 
         </p>
       )}
 
+      {queueErr && <p className="msg err">{queueErr}</p>}
+
+      <Jobs onFinished={onRefresh} />
+
       <ul className="clips">
         {shown.map((c) => {
-          const b = busy[c.id];
           return (
             <li key={c.id} className={`clip ${c.status}`}>
               {c.thumbnail_url ? (
@@ -132,7 +136,7 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings, 
                     {c.title || '(untitled clip)'}
                   </a>
                   <span className="dur">{Math.round(c.duration)}s</span>
-                  <span className={`badge ${c.status}`}>{LABEL[c.status] || c.status}</span>
+                  <span className={`badge ${c.status}`} title={TIP[c.status]}>{LABEL[c.status] || c.status}</span>
                 </div>
                 <div className="row sub muted tiny">
                   {c.creator && <span>clipped by {c.creator}</span>}
@@ -143,8 +147,8 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings, 
                   <div className="row actions">
                     <code title={c.out_path}>{c.out_path}</code>
                     <button className="small ghost" onClick={() => onPreview(c.id)}>Preview</button>
-                    <button className="small" disabled={b?.state === 'run'} onClick={() => render(c.id)}>
-                      {b?.state === 'run' ? 'Rendering…' : b?.state === 'done' ? '✓ Rendered' : c.rendered ? 'Re-render' : 'Render vertical'}
+                    <button className="small" onClick={() => render(c.id)} title="Cut this clip from your local recording at full quality">
+                      {c.rendered ? 'Re-render' : 'Render vertical'}
                     </button>
                   </div>
                 ) : (
@@ -155,7 +159,6 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings, 
                     )}
                   </div>
                 )}
-                {b?.state === 'err' && <div className="msg err tiny">{b.msg}</div>}
               </div>
             </li>
           );
@@ -165,7 +168,6 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings, 
       {previewId && clips.some((c) => c.id === previewId) && (
         <ClipPreview
           clip={clips.find((c) => c.id === previewId)}
-          busy={busy[previewId]?.state === 'run'}
           onClose={() => onPreview(null)}
           onGoMapping={onGoMapping}
           onRender={render}

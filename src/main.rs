@@ -6,7 +6,9 @@
 //! Settings live in a .env managed by the portal's Settings page (see settings.rs).
 //! CLI flags override the saved values for that invocation.
 
+mod auth;
 mod firebase;
+mod jobs;
 mod layout;
 mod mapping;
 mod pipeline;
