@@ -55,12 +55,14 @@ impl Twitch {
         r.data.into_iter().next().map(|u| u.id).context("channel not found")
     }
 
-    /// Up to 100 clips created after `started_at` (RFC3339).
-    pub async fn clips(&self, broadcaster_id: &str, started_at: &str) -> Result<Vec<ClipDto>> {
+    /// Up to 100 clips in [`started_at`, `ended_at`] (RFC3339). Both bounds are
+    /// required together — Twitch otherwise defaults ended_at to one WEEK after
+    /// started_at, silently dropping anything more recent than that.
+    pub async fn clips(&self, broadcaster_id: &str, started_at: &str, ended_at: &str) -> Result<Vec<ClipDto>> {
         #[derive(Deserialize)] struct R { data: Vec<ClipDto> }
         let r: R = self.get(
             "https://api.twitch.tv/helix/clips",
-            &[("broadcaster_id", broadcaster_id), ("started_at", started_at), ("first", "100")],
+            &[("broadcaster_id", broadcaster_id), ("started_at", started_at), ("ended_at", ended_at), ("first", "100")],
         ).await?;
         Ok(r.data)
     }

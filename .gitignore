@@ -3,3 +3,5 @@
 .env
 *.mp4
 *.mkv
+/web/node_modules
+/web/dist

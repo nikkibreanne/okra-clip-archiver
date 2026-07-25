@@ -15,3 +15,6 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 dotenvy = "0.15"
+axum = "0.7"
+tower-http = { version = "0.6", features = ["fs"] }
+open = "5"

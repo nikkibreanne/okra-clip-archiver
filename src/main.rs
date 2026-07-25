@@ -1,19 +1,17 @@
-//! okra-clip-archiver — pull a Twitch stream's clips and cut local high-res
-//! (4K) verticals for Shorts/TikTok. This scaffold is the DRY-RUN core: enumerate
-//! ≤60s clips, resolve each to a local recording + in/out, and print the exact
-//! ffmpeg command it would run (`--run` to execute). A React GUI + uploaders come
-//! next; the planner (src/planner.rs) is fully unit-tested.
+//! okra-clip-archiver — pull a Twitch stream's clips and cut local high-res (4K)
+//! verticals for Shorts/TikTok.
+//!   (default)  dry-run/render in the terminal (`--run` to execute ffmpeg)
+//!   serve      launch the web portal (opens your browser)
 
 mod firebase;
+mod pipeline;
 mod planner;
+mod server;
 mod twitch;
 
 use anyhow::Result;
-use clap::Parser;
-use std::collections::{HashMap, HashSet};
-
-use planner::{find_recording, parse_obs_filename_epoch, plan_clip, Clip, Plan, Recording, DEFAULT_VERTICAL_FILTER};
-use twitch::ClipDto;
+use clap::{Parser, Subcommand};
+use pipeline::Cfg;
 
 #[derive(Parser)]
 #[command(name = "okra-clip-archiver", about = "Cut local 4K verticals from a stream's Twitch clips")]
@@ -30,12 +28,12 @@ struct Args {
     /// Padding (seconds) added around each clip
     #[arg(long, default_value_t = 5.0)]
     pad: f64,
-    /// Actually run ffmpeg (default: dry-run — print the commands only)
-    #[arg(long)]
-    run: bool,
     /// Output folder for rendered verticals
     #[arg(long, default_value = "out")]
     out_dir: String,
+    /// Actually run ffmpeg (default: dry-run — print the commands only)
+    #[arg(long)]
+    run: bool,
     #[arg(long, env = "TWITCH_CLIENT_ID")]
     client_id: String,
     #[arg(long, env = "TWITCH_CLIENT_SECRET")]
@@ -43,141 +41,89 @@ struct Args {
     /// Firebase RTDB base URL (reads the clipSync clapperboard anchors)
     #[arg(long, env = "FIREBASE_DATABASE_URL")]
     firebase_url: Option<String>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Launch the web portal (opens your browser)
+    Serve {
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+    },
+}
+
+impl Args {
+    fn cfg(&self) -> Cfg {
+        Cfg {
+            channel: self.channel.clone(),
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            recordings: self.recordings.clone(),
+            days: self.days,
+            pad: self.pad,
+            out_dir: self.out_dir.clone(),
+            firebase_url: self.firebase_url.clone(),
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let args = Args::parse();
-    if args.run {
-        ensure_ffmpeg().await?; // fail fast with a clear message before any network calls
+    let cfg = args.cfg();
+    match args.command {
+        Some(Command::Serve { port }) => server::serve(cfg, port).await,
+        None => run_cli(cfg, args.run).await,
+    }
+}
+
+async fn run_cli(cfg: Cfg, run: bool) -> Result<()> {
+    if run {
+        pipeline::ensure_ffmpeg().await?; // fail fast before any network calls
     }
 
-    let tw = twitch::Twitch::app_token(&args.client_id, &args.client_secret).await?;
-    let broadcaster_id = tw.user_id(&args.channel).await?;
-
-    let started_at = (chrono::Utc::now() - chrono::Duration::days(args.days)).to_rfc3339();
-    let mut clips = tw.clips(&broadcaster_id, &started_at).await?;
-    clips.retain(|c| c.duration <= 60.0);
-
-    // VOD start times, one lookup per unique video id (the timeline anchor).
-    let mut vod_start: HashMap<String, i64> = HashMap::new();
-    let video_ids: HashSet<String> = clips.iter().map(|c| c.video_id.clone()).filter(|v| !v.is_empty()).collect();
-    for vid in video_ids {
-        if let Ok(Some(ms)) = tw.video_start_ms(&vid).await {
-            vod_start.insert(vid, ms);
-        }
-    }
-
-    // Clapperboard anchors (informational in the scaffold; the precise-alignment
-    // refinement will prefer these over the VOD-start estimate).
-    if let Some(url) = &args.firebase_url {
+    // Clapperboard anchors (informational for now; precise-alignment uses them later).
+    if let Some(url) = &cfg.firebase_url {
         match firebase::anchors(url).await {
             Ok(a) => eprintln!("clipSync anchors: {}", a.len()),
             Err(e) => eprintln!("clipSync read failed (non-fatal): {e}"),
         }
     }
 
-    let recordings = scan_recordings(args.recordings.as_deref());
-    eprintln!(
-        "\n{} — {} clips ≤60s · {} recording(s) · mode {}\n",
-        args.channel, clips.len(), recordings.len(), if args.run { "RUN" } else { "DRY-RUN" }
-    );
+    let rows = pipeline::plan_rows(&cfg).await?;
+    let ready = rows.iter().filter(|r| r.status == "ready").count();
+    eprintln!("\n{} — {} clips ≤60s · mode {}\n", cfg.channel, rows.len(), if run { "RUN" } else { "DRY-RUN" });
 
-    let mut ready = 0usize;
-    for c in &clips {
-        let clip = to_clip(c);
-        let vs = vod_start.get(&c.video_id).copied();
-        let moment = match (vs, c.vod_offset) { (Some(s), Some(o)) => Some(s + o * 1000), _ => None };
-        let rec = moment.and_then(|m| find_recording(&recordings, m));
-        let plan = plan_clip(&clip, vs, rec, args.pad, DEFAULT_VERTICAL_FILTER, &args.out_dir);
-
-        println!("• {}  [{:.0}s]  {}", trunc(&c.title, 48), c.duration, c.url);
-        match &plan {
-            Plan::Ready { in_sec, out_sec, out_path, ffmpeg, .. } => {
-                ready += 1;
-                println!("  cut {in_sec:.2}s → {out_sec:.2}s  →  {out_path}");
-                println!("  $ {}", shell_join(ffmpeg));
-                if args.run {
-                    match run_ffmpeg(ffmpeg).await {
-                        Ok(()) => println!("  ✓ rendered"),
-                        Err(e) => println!("  ✗ render failed: {e}"), // one bad clip never aborts the batch
-                    }
+    for r in &rows {
+        println!("• {}  [{:.0}s]  {}", trunc(&r.title, 48), r.duration, r.url);
+        if r.status == "ready" {
+            println!(
+                "  cut {:.2}s → {:.2}s  →  {}",
+                r.in_sec.unwrap_or(0.0),
+                r.out_sec.unwrap_or(0.0),
+                r.out_path.as_deref().unwrap_or("")
+            );
+            if let Some(cmd) = &r.ffmpeg {
+                println!("  $ {}", shell_join(cmd));
+            }
+            if run {
+                match pipeline::render(r).await {
+                    Ok(()) => println!("  ✓ rendered"),
+                    Err(e) => println!("  ✗ render failed: {e}"),
                 }
             }
-            Plan::Skip(r) | Plan::Unmappable(r) | Plan::NoRecording(r) => {
-                let win = c.vod_offset.map(|o| format!("vod in={o}s out={}s", o + c.duration as i64))
-                    .unwrap_or_else(|| "vod_offset pending".into());
-                println!("  {r}  ({win})");
-            }
+        } else {
+            let win = r
+                .vod_offset
+                .map(|o| format!("vod in={o}s out={}s", o + r.duration as i64))
+                .unwrap_or_else(|| "vod_offset pending".into());
+            println!("  {}: {}  ({win})", r.status, r.reason.as_deref().unwrap_or(""));
         }
     }
-    eprintln!("\n{ready} ready{}", if args.run { " (rendered)" } else { " (dry-run — pass --run to render)" });
-    Ok(())
-}
-
-fn to_clip(c: &ClipDto) -> Clip {
-    Clip {
-        id: c.id.clone(),
-        title: c.title.clone(),
-        duration_sec: c.duration,
-        vod_offset_sec: c.vod_offset,
-        video_id: Some(c.video_id.clone()),
-        created_at_ms: chrono::DateTime::parse_from_rfc3339(&c.created_at).map(|d| d.timestamp_millis()).unwrap_or(0),
-        url: c.url.clone(),
-    }
-}
-
-fn scan_recordings(dir: Option<&str>) -> Vec<Recording> {
-    let mut out = Vec::new();
-    let Some(dir) = dir else { return out };
-    let Ok(rd) = std::fs::read_dir(dir) else { return out };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        let ext_ok = matches!(
-            path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
-            Some("mkv" | "mp4" | "mov" | "flv" | "ts" | "m4v")
-        );
-        if !ext_ok { continue; }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let start = parse_obs_filename_epoch(&name).or_else(|| {
-            entry.metadata().ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-        });
-        if let Some(start_epoch_ms) = start {
-            out.push(Recording { path: path.to_string_lossy().to_string(), start_epoch_ms, duration_sec: None });
-        }
-    }
-    out.sort_by_key(|r| r.start_epoch_ms);
-    out
-}
-
-/// Verify ffmpeg is launchable, with an actionable message if it isn't.
-async fn ensure_ffmpeg() -> Result<()> {
-    tokio::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => anyhow::anyhow!(
-                "ffmpeg not found on PATH — install it (WSL/Linux: `sudo apt install -y ffmpeg`; \
-                 Windows: put ffmpeg.exe next to this tool) then re-run"
-            ),
-            _ => anyhow::anyhow!("couldn't run ffmpeg: {e}"),
-        })?;
-    Ok(())
-}
-
-async fn run_ffmpeg(cmd: &[String]) -> Result<()> {
-    if let Some(parent) = std::path::Path::new(cmd.last().unwrap()).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let status = tokio::process::Command::new(&cmd[0]).args(&cmd[1..]).status().await?;
-    anyhow::ensure!(status.success(), "ffmpeg exited with {status}");
+    eprintln!("\n{ready} ready{}", if run { " (rendered)" } else { " (dry-run — pass --run to render)" });
     Ok(())
 }
 
