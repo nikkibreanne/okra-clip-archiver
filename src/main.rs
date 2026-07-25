@@ -8,6 +8,7 @@
 
 mod firebase;
 mod layout;
+mod mapping;
 mod pipeline;
 mod planner;
 mod server;

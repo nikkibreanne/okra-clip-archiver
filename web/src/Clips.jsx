@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
+import ClipPreview from './ClipPreview.jsx';
 
 const LABEL = {
   ready: 'Ready',
-  'no-recording': 'No local recording',
+  'no-recording': 'Not mapped',
   unmappable: 'Waiting on VOD',
   skip: 'Too long',
 };
@@ -13,7 +14,7 @@ const FILTERS = [
   { id: 'blocked', label: 'Needs attention' },
 ];
 
-export default function Clips({ clips, error, loading, onRefresh, onGoSettings }) {
+export default function Clips({ clips, error, loading, onRefresh, onGoSettings, onGoMapping, previewId, onPreview }) {
   const [filter, setFilter] = useState('all');
   const [busy, setBusy] = useState({});
 
@@ -110,8 +111,8 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings }
 
       {counts.ready === 0 && (
         <p className="msg warn">
-          No clip maps to a local recording yet. Point <b>Settings → recordings folder</b> at your OBS output, and make sure
-          “Store past broadcasts” is on in Twitch so clips carry a VOD offset.
+          No clip is mapped to a local recording yet. Check <button className="linkish" onClick={onGoMapping}>VOD mapping</button> to
+          pick the right file by hand, and make sure “Store past broadcasts” is on in Twitch so clips carry a VOD offset.
         </p>
       )}
 
@@ -141,12 +142,18 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings }
                 {c.status === 'ready' ? (
                   <div className="row actions">
                     <code title={c.out_path}>{c.out_path}</code>
+                    <button className="small ghost" onClick={() => onPreview(c.id)}>Preview</button>
                     <button className="small" disabled={b?.state === 'run'} onClick={() => render(c.id)}>
                       {b?.state === 'run' ? 'Rendering…' : b?.state === 'done' ? '✓ Rendered' : c.rendered ? 'Re-render' : 'Render vertical'}
                     </button>
                   </div>
                 ) : (
-                  <div className="row sub muted tiny">{c.reason}</div>
+                  <div className="row actions">
+                    <span className="muted tiny grow">{c.reason}</span>
+                    {c.status === 'no-recording' && (
+                      <button className="small ghost" onClick={onGoMapping}>Map a recording</button>
+                    )}
+                  </div>
                 )}
                 {b?.state === 'err' && <div className="msg err tiny">{b.msg}</div>}
               </div>
@@ -154,6 +161,16 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings }
           );
         })}
       </ul>
+
+      {previewId && clips.some((c) => c.id === previewId) && (
+        <ClipPreview
+          clip={clips.find((c) => c.id === previewId)}
+          busy={busy[previewId]?.state === 'run'}
+          onClose={() => onPreview(null)}
+          onGoMapping={onGoMapping}
+          onRender={render}
+        />
+      )}
     </>
   );
 }

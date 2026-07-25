@@ -97,27 +97,40 @@ pub fn find_recording<'a>(recordings: &'a [Recording], at_epoch_ms: i64) -> Opti
     best
 }
 
+/// Where a VOD's t=0 sits inside a local recording — the single thing needed to
+/// turn a clip's `vod_offset` into a position in the file. Built either by
+/// inference (`anchor_from_inference`) or from a manual mapping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Anchor {
+    pub path: String,
+    pub vod_zero_at_sec: f64,
+    /// True when the user pinned this by hand rather than us guessing.
+    pub manual: bool,
+}
+
+/// Infer the anchor from wall-clock: the VOD started `vod_start - rec_start` into
+/// the recording.
+pub fn anchor_from_inference(recording: &Recording, vod_start_epoch_ms: i64) -> Anchor {
+    Anchor {
+        path: recording.path.clone(),
+        vod_zero_at_sec: (vod_start_epoch_ms - recording.start_epoch_ms) as f64 / 1000.0,
+        manual: false,
+    }
+}
+
 /// Build the extraction plan for one clip.
-pub fn plan_clip(
-    clip: &Clip,
-    vod_start_epoch_ms: Option<i64>,
-    recording: Option<&Recording>,
-    opts: &RenderOpts,
-) -> Plan {
+pub fn plan_clip(clip: &Clip, anchor: Option<&Anchor>, opts: &RenderOpts) -> Plan {
     if clip.duration_sec > opts.max_clip_sec {
         return Plan::Skip(format!("longer than {:.0}s", opts.max_clip_sec));
     }
-    let (vod_start, vod_offset) = match (vod_start_epoch_ms, clip.vod_offset_sec) {
-        (Some(s), Some(o)) => (s, o),
-        _ => return Plan::Unmappable("vod_offset/VOD not available (processing, off, or expired)".into()),
+    let Some(vod_offset) = clip.vod_offset_sec else {
+        return Plan::Unmappable("Twitch hasn't published this clip's VOD position yet (it appears minutes later, and needs VODs enabled)".into());
     };
-    let recording = match recording {
-        Some(r) => r,
-        None => return Plan::NoRecording("no local recording covers this moment".into()),
+    let Some(anchor) = anchor else {
+        return Plan::NoRecording("no local recording is mapped to this VOD".into());
     };
 
-    let moment_ms = vod_start + vod_offset * 1000;
-    let moment_local_sec = (moment_ms - recording.start_epoch_ms) as f64 / 1000.0;
+    let moment_local_sec = anchor.vod_zero_at_sec + vod_offset as f64;
     let in_sec = (moment_local_sec - opts.pad_sec).max(0.0);
     let out_sec = moment_local_sec + clip.duration_sec + opts.pad_sec;
 
@@ -132,7 +145,7 @@ pub fn plan_clip(
     let ffmpeg = vec![
         "ffmpeg".into(), "-y".into(),
         "-ss".into(), format!("{in_sec:.2}"),
-        "-i".into(), recording.path.clone(),
+        "-i".into(), anchor.path.clone(),
         "-t".into(), format!("{:.2}", out_sec - in_sec),
         "-filter_complex".into(), opts.filter.clone(),
         "-map".into(), "[v]".into(), "-map".into(), "0:a?".into(),
@@ -140,7 +153,7 @@ pub fn plan_clip(
         "-c:a".into(), "aac".into(), "-b:a".into(), opts.audio_bitrate.clone(),
         out_path.clone(),
     ];
-    Plan::Ready { in_sec, out_sec, local_path: recording.path.clone(), out_path, ffmpeg }
+    Plan::Ready { in_sec, out_sec, local_path: anchor.path.clone(), out_path, ffmpeg }
 }
 
 #[cfg(test)]
@@ -178,11 +191,13 @@ mod tests {
     fn maps_vod_offset_absorbing_start_gap() {
         // OBS started recording 30s BEFORE the VOD; clip is 100s into the VOD, 20s long.
         let rec = Recording { path: "/rec/a.mkv".into(), start_epoch_ms: base() - 30_000, duration_sec: None };
+        let anchor = anchor_from_inference(&rec, base());
+        assert_eq!(anchor.vod_zero_at_sec, 30.0, "VOD t=0 is 30s into the file");
         let clip = Clip {
             id: "Clip 1!".into(), title: "t".into(), duration_sec: 20.0, vod_offset_sec: Some(100),
             video_id: Some("v1".into()), created_at_ms: base() + 100_000, url: "u".into(),
         };
-        match plan_clip(&clip, Some(base()), Some(&rec), &RenderOpts::default()) {
+        match plan_clip(&clip, Some(&anchor), &RenderOpts::default()) {
             Plan::Ready { in_sec, out_sec, ffmpeg, out_path, .. } => {
                 assert_eq!(in_sec, 125.0); // 100s into VOD = 130s into local; −5 pad
                 assert_eq!(out_sec, 155.0);
@@ -202,11 +217,45 @@ mod tests {
             video_id: Some("v1".into()), created_at_ms: base(), url: "u".into(),
         };
         let o = RenderOpts::default();
+        let anchor = Anchor { path: "/rec/a.mkv".into(), vod_zero_at_sec: 0.0, manual: false };
         let long = Clip { duration_sec: 90.0, ..clip.clone() };
-        assert!(matches!(plan_clip(&long, Some(base()), None, &o), Plan::Skip(_)));
+        assert!(matches!(plan_clip(&long, Some(&anchor), &o), Plan::Skip(_)));
         let novod = Clip { vod_offset_sec: None, ..clip.clone() };
-        assert!(matches!(plan_clip(&novod, None, None, &o), Plan::Unmappable(_)));
-        assert!(matches!(plan_clip(&clip, Some(base()), None, &o), Plan::NoRecording(_)));
+        assert!(matches!(plan_clip(&novod, Some(&anchor), &o), Plan::Unmappable(_)));
+        assert!(matches!(plan_clip(&clip, None, &o), Plan::NoRecording(_)));
+    }
+
+    #[test]
+    fn a_manual_anchor_overrides_inference_and_offsets_the_cut() {
+        // User pinned the VOD: its t=0 is 12.5s into this file.
+        let anchor = Anchor { path: "/rec/manual.mkv".into(), vod_zero_at_sec: 12.5, manual: true };
+        let clip = Clip {
+            id: "x".into(), title: "t".into(), duration_sec: 10.0, vod_offset_sec: Some(100),
+            video_id: Some("v1".into()), created_at_ms: base(), url: "u".into(),
+        };
+        let opts = RenderOpts { pad_sec: 2.0, ..Default::default() };
+        match plan_clip(&clip, Some(&anchor), &opts) {
+            Plan::Ready { in_sec, out_sec, local_path, .. } => {
+                assert_eq!(in_sec, 110.5); // 12.5 + 100 − 2
+                assert_eq!(out_sec, 124.5); // 12.5 + 100 + 10 + 2
+                assert_eq!(local_path, "/rec/manual.mkv");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_negative_anchor_clamps_the_in_point_to_zero() {
+        // Recording started AFTER the VOD — the clip may sit before the file begins.
+        let anchor = Anchor { path: "/rec/a.mkv".into(), vod_zero_at_sec: -50.0, manual: true };
+        let clip = Clip {
+            id: "x".into(), title: "t".into(), duration_sec: 10.0, vod_offset_sec: Some(10),
+            video_id: Some("v1".into()), created_at_ms: base(), url: "u".into(),
+        };
+        match plan_clip(&clip, Some(&anchor), &RenderOpts::default()) {
+            Plan::Ready { in_sec, .. } => assert_eq!(in_sec, 0.0, "never seeks before the file start"),
+            other => panic!("expected Ready, got {other:?}"),
+        }
     }
 
     #[test]
@@ -220,7 +269,7 @@ mod tests {
             crf: 23, preset: "veryfast".into(), audio_bitrate: "96k".into(),
             out_dir: "renders/".into(), pad_sec: 0.0, ..Default::default()
         };
-        match plan_clip(&clip, Some(base()), Some(&rec), &opts) {
+        match plan_clip(&clip, Some(&anchor_from_inference(&rec, base())), &opts) {
             Plan::Ready { ffmpeg, out_path, .. } => {
                 let at = |flag: &str| ffmpeg[ffmpeg.iter().position(|a| a == flag).unwrap() + 1].clone();
                 assert_eq!(at("-crf"), "23");
@@ -240,6 +289,7 @@ mod tests {
         };
         let rec = Recording { path: "/rec/a.mkv".into(), start_epoch_ms: base(), duration_sec: None };
         let opts = RenderOpts { max_clip_sec: 120.0, ..Default::default() };
-        assert!(matches!(plan_clip(&clip, Some(base()), Some(&rec), &opts), Plan::Ready { .. }));
+        let anchor = anchor_from_inference(&rec, base());
+        assert!(matches!(plan_clip(&clip, Some(&anchor), &opts), Plan::Ready { .. }));
     }
 }

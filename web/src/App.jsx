@@ -1,26 +1,35 @@
 import { useCallback, useEffect, useState } from 'react';
 import Clips from './Clips.jsx';
 import LayoutEditor from './LayoutEditor.jsx';
+import Mapping from './Mapping.jsx';
 import Settings from './Settings.jsx';
+import Uploads from './Uploads.jsx';
 
 const TABS = [
   { id: 'clips', label: 'Clips' },
+  { id: 'mapping', label: 'VOD mapping' },
   { id: 'layout', label: 'Vertical layout' },
+  { id: 'uploads', label: 'Uploads' },
   { id: 'settings', label: 'Settings' },
 ];
 
-const validTab = (t) => (TABS.some((x) => x.id === t) ? t : 'clips');
+// Hash is "tab" or "tab:param" (param currently = the clip open in the preview),
+// so any view — including an open preview — is reload-safe and linkable.
+const parseHash = () => {
+  const [t, ...rest] = decodeURIComponent(window.location.hash.slice(1)).split(':');
+  return { tab: TABS.some((x) => x.id === t) ? t : 'clips', param: rest.join(':') || null };
+};
 
 export default function App() {
-  // Tab lives in the URL hash so a reload (and a deep link) keeps your place.
-  const [tab, setTabState] = useState(() => validTab(window.location.hash.slice(1)));
-  const setTab = useCallback((t) => {
-    setTabState(t);
-    if (window.location.hash.slice(1) !== t) window.location.hash = t;
+  const [{ tab, param }, setRoute] = useState(parseHash);
+  const setTab = useCallback((t, p = null) => {
+    const next = p ? `${t}:${p}` : t;
+    if (window.location.hash.slice(1) !== next) window.location.hash = next;
+    setRoute({ tab: t, param: p });
   }, []);
 
   useEffect(() => {
-    const onHash = () => setTabState(validTab(window.location.hash.slice(1)));
+    const onHash = () => setRoute(parseHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -114,9 +123,14 @@ export default function App() {
           loading={loading}
           onRefresh={refreshAll}
           onGoSettings={() => setTab('settings')}
+          onGoMapping={() => setTab('mapping')}
+          previewId={param}
+          onPreview={(id) => setTab('clips', id)}
         />
       )}
+      {tab === 'mapping' && <Mapping onChanged={refreshAll} onGoSettings={() => setTab('settings')} />}
       {tab === 'layout' && <LayoutEditor clips={clips} onGoSettings={() => setTab('settings')} />}
+      {tab === 'uploads' && <Uploads status={status} onGoSettings={() => setTab('settings')} />}
       {tab === 'settings' && <Settings onSaved={refreshAll} />}
     </div>
   );

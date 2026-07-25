@@ -39,6 +39,10 @@ pub async fn serve(port: u16) -> Result<()> {
         .route("/api/layout", get(get_layout).post(post_layout).delete(delete_layout))
         .route("/api/frame", get(frame))
         .route("/api/reveal", post(reveal))
+        .route("/api/vods", get(vods))
+        .route("/api/recordings", get(recordings))
+        .route("/api/mapping", post(post_mapping))
+        .route("/api/preview", get(preview))
         .fallback(static_handler);
 
     // Bind the first free port from `port` so a second launch doesn't just fail.
@@ -197,6 +201,62 @@ async fn reveal() -> Result<Json<Value>, ApiError> {
     let abs = std::fs::canonicalize(&dir).unwrap_or_else(|_| std::path::PathBuf::from(&dir));
     open::that(&abs).map_err(|e| anyhow::anyhow!("couldn't open {}: {e}", abs.display()))?;
     Ok(Json(json!({ "ok": true, "path": abs.to_string_lossy() })))
+}
+
+/// The VODs behind the current clips + how each maps to a local recording.
+async fn vods() -> Result<Json<Value>, ApiError> {
+    let s = settings::get();
+    let fetched = pipeline::fetch(&s).await?;
+    Ok(Json(json!({
+        "vods": pipeline::vod_rows(&fetched),
+        "recordings": pipeline::recording_rows(&s),
+    })))
+}
+
+async fn recordings() -> Json<Value> {
+    Json(json!({ "recordings": pipeline::recording_rows(&settings::get()) }))
+}
+
+#[derive(Deserialize)]
+struct MappingReq {
+    video_id: String,
+    /// null / omitted clears the manual mapping (back to inference).
+    #[serde(default)]
+    recording_path: Option<String>,
+    #[serde(default)]
+    vod_zero_at_sec: Option<f64>,
+}
+
+async fn post_mapping(Json(req): Json<MappingReq>) -> Result<Json<Value>, ApiError> {
+    let m = req.recording_path.filter(|p| !p.trim().is_empty()).map(|p| crate::mapping::Mapping {
+        recording_path: p,
+        vod_zero_at_sec: req.vod_zero_at_sec.unwrap_or(0.0),
+    });
+    crate::mapping::set(&req.video_id, m)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct PreviewQuery {
+    id: String,
+}
+
+/// A small, browser-playable MP4 of the clip's window cut from the LOCAL
+/// recording — this is how you eyeball whether a mapping is right before
+/// rendering. Recordings are often MKV (which browsers can't play), so we
+/// transcode a low-res proxy and cache it.
+async fn preview(Query(q): Query<PreviewQuery>) -> Result<axum::response::Response, ApiError> {
+    let s = settings::get();
+    let rows = pipeline::plan_rows(&s).await?;
+    let row = rows.iter().find(|r| r.id == q.id).ok_or_else(|| anyhow::anyhow!("clip not found"))?;
+    let path = row.local_path.clone().ok_or_else(|| anyhow::anyhow!("this clip has no local recording mapped"))?;
+    let (in_sec, out_sec) = (row.in_sec.unwrap_or(0.0), row.out_sec.unwrap_or(0.0));
+    let bytes = pipeline::preview_clip(&row.id, &path, in_sec, out_sec - in_sec).await?;
+    Ok((
+        [(header::CONTENT_TYPE, "video/mp4"), (header::CACHE_CONTROL, "no-store")],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Turn any pipeline error into a 500 with the message (the UI shows it).

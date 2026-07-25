@@ -8,7 +8,10 @@ use anyhow::Result;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-use crate::planner::{find_recording, parse_obs_filename_epoch, plan_clip, Clip, Plan, Recording, RenderOpts, DEFAULT_VERTICAL_FILTER};
+use crate::planner::{
+    anchor_from_inference, find_recording, parse_obs_filename_epoch, plan_clip, Anchor, Clip, Plan, Recording, RenderOpts,
+    DEFAULT_VERTICAL_FILTER,
+};
 use crate::settings::Settings;
 use crate::twitch::{ClipDto, Twitch};
 
@@ -32,6 +35,33 @@ pub struct PlanRow {
     pub vod_offset: Option<i64>,
     /// True when out_path already exists on disk (already rendered).
     pub rendered: bool,
+    pub video_id: String,
+    /// How this clip found its recording: "manual" | "inferred" | "none".
+    pub anchor_source: String,
+}
+
+/// A VOD (Twitch broadcast) that the fetched clips came from, with how it maps to
+/// a local recording — the data behind the mapping UI.
+#[derive(Serialize, Clone)]
+pub struct VodRow {
+    pub video_id: String,
+    pub clip_count: usize,
+    pub first_clip_at: String,
+    /// VOD start (epoch ms) if Twitch still has it — null once the VOD expires.
+    pub vod_start_ms: Option<i64>,
+    pub inferred_path: Option<String>,
+    pub mapped_path: Option<String>,
+    pub vod_zero_at_sec: f64,
+    pub manual: bool,
+}
+
+/// A local recording file offered in the mapping UI.
+#[derive(Serialize, Clone)]
+pub struct RecordingRow {
+    pub path: String,
+    pub name: String,
+    pub start_epoch_ms: i64,
+    pub size_mb: u64,
 }
 
 /// Build the ffmpeg options for the current settings + saved layout.
@@ -47,8 +77,15 @@ pub fn render_opts(s: &Settings) -> RenderOpts {
     }
 }
 
-/// Fetch + plan every clip for the configured channel.
-pub async fn plan_rows(s: &Settings) -> Result<Vec<PlanRow>> {
+/// Everything fetched from Twitch for one pass, so clips + VOD mapping share a
+/// single round of API calls.
+pub struct Fetched {
+    pub clips: Vec<ClipDto>,
+    pub vod_start: HashMap<String, i64>,
+    pub recordings: Vec<Recording>,
+}
+
+pub async fn fetch(s: &Settings) -> Result<Fetched> {
     let (client_id, client_secret, channel) = s.twitch_creds()?;
     let tw = Twitch::app_token(client_id, client_secret).await?;
     let broadcaster_id = tw.user_id(channel).await?;
@@ -67,18 +104,100 @@ pub async fn plan_rows(s: &Settings) -> Result<Vec<PlanRow>> {
         }
     }
 
-    let recordings = scan_recordings(s.recordings_dir.as_str());
+    Ok(Fetched { clips, vod_start, recordings: scan_recordings(s.recordings_dir.as_str()) })
+}
+
+/// Resolve a VOD's anchor: a manual mapping always wins; otherwise infer it from
+/// wall-clock. Returns None when neither is possible.
+fn resolve_anchor(
+    video_id: &str,
+    vod_start: Option<i64>,
+    recordings: &[Recording],
+    manual: &crate::mapping::Mappings,
+) -> Option<Anchor> {
+    if let Some(m) = manual.get(video_id) {
+        return Some(Anchor { path: m.recording_path.clone(), vod_zero_at_sec: m.vod_zero_at_sec, manual: true });
+    }
+    let start = vod_start?;
+    find_recording(recordings, start).map(|r| anchor_from_inference(r, start))
+}
+
+/// The VODs behind the fetched clips, with their inferred/manual mapping.
+pub fn vod_rows(f: &Fetched) -> Vec<VodRow> {
+    let manual = crate::mapping::load();
+    let mut by_vod: HashMap<String, (usize, String)> = HashMap::new();
+    for c in &f.clips {
+        if c.video_id.is_empty() {
+            continue;
+        }
+        let e = by_vod.entry(c.video_id.clone()).or_insert((0, c.created_at.clone()));
+        e.0 += 1;
+        if c.created_at < e.1 {
+            e.1 = c.created_at.clone();
+        }
+    }
+    let mut rows: Vec<VodRow> = by_vod
+        .into_iter()
+        .map(|(video_id, (clip_count, first_clip_at))| {
+            let vod_start = f.vod_start.get(&video_id).copied();
+            let inferred = vod_start.and_then(|st| find_recording(&f.recordings, st).map(|r| anchor_from_inference(r, st)));
+            let anchor = resolve_anchor(&video_id, vod_start, &f.recordings, &manual);
+            VodRow {
+                video_id,
+                clip_count,
+                first_clip_at,
+                vod_start_ms: vod_start,
+                inferred_path: inferred.map(|a| a.path),
+                mapped_path: anchor.as_ref().map(|a| a.path.clone()),
+                vod_zero_at_sec: anchor.as_ref().map(|a| a.vod_zero_at_sec).unwrap_or(0.0),
+                manual: anchor.map(|a| a.manual).unwrap_or(false),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.first_clip_at.cmp(&a.first_clip_at));
+    rows
+}
+
+/// The local recording files available for mapping.
+pub fn recording_rows(s: &Settings) -> Vec<RecordingRow> {
+    scan_recordings(&s.recordings_dir)
+        .into_iter()
+        .map(|r| RecordingRow {
+            name: std::path::Path::new(&r.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| r.path.clone()),
+            size_mb: std::fs::metadata(&r.path).map(|m| m.len() / 1_048_576).unwrap_or(0),
+            start_epoch_ms: r.start_epoch_ms,
+            path: r.path,
+        })
+        .collect()
+}
+
+/// Fetch + plan every clip for the configured channel.
+pub async fn plan_rows(s: &Settings) -> Result<Vec<PlanRow>> {
+    plan_from(s, &fetch(s).await?)
+}
+
+/// Plan against an already-fetched set (so one request can do both).
+pub fn plan_from(s: &Settings, f: &Fetched) -> Result<Vec<PlanRow>> {
     let opts = render_opts(s);
+    let manual = crate::mapping::load();
 
     let mut rows = Vec::new();
-    for c in &clips {
+    for c in &f.clips {
         let clip = to_clip(c);
-        let vs = vod_start.get(&c.video_id).copied();
-        let moment = match (vs, c.vod_offset) { (Some(st), Some(o)) => Some(st + o * 1000), _ => None };
-        let rec = moment.and_then(|m| find_recording(&recordings, m));
-        let plan = plan_clip(&clip, vs, rec, &opts);
+        let vs = f.vod_start.get(&c.video_id).copied();
+        let anchor = resolve_anchor(&c.video_id, vs, &f.recordings, &manual);
+        let plan = plan_clip(&clip, anchor.as_ref(), &opts);
 
         let mut row = PlanRow {
+            video_id: c.video_id.clone(),
+            anchor_source: match &anchor {
+                Some(a) if a.manual => "manual".into(),
+                Some(_) => "inferred".into(),
+                None => "none".into(),
+            },
             id: c.id.clone(),
             title: c.title.trim().to_string(),
             url: c.url.clone(),
@@ -135,6 +254,70 @@ pub async fn extract_frame(path: &str, t: f64) -> Result<Vec<u8>> {
     anyhow::ensure!(out.status.success(), "ffmpeg couldn't read a frame from {path}");
     anyhow::ensure!(!out.stdout.is_empty(), "ffmpeg produced no frame");
     Ok(out.stdout)
+}
+
+/// The codecs in a media file, as ffprobe reports them.
+async fn probe_codecs(path: &str) -> (Option<String>, Option<String>) {
+    let out = tokio::process::Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "csv=p=0", path])
+        .output()
+        .await;
+    let (mut v, mut a) = (None, None);
+    if let Ok(o) = out {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            match line.trim().split_once(',') {
+                Some((name, "video")) if v.is_none() => v = Some(name.to_string()),
+                Some((name, "audio")) if a.is_none() => a = Some(name.to_string()),
+                _ => {}
+            }
+        }
+    }
+    (v, a)
+}
+
+/// A browser-playable MP4 of one clip window, cut from the local recording.
+/// Recordings are usually MKV, which browsers can't play — but the streams inside
+/// are normally H.264/AAC, so we REMUX (stream copy) instead of re-encoding:
+/// ~0.3s and full quality, versus ~10s and 480p for a transcode. Anything else
+/// (HEVC, PCM audio, …) falls back to a small transcode. Cached per clip+window.
+pub async fn preview_clip(clip_id: &str, path: &str, start: f64, dur: f64) -> Result<Vec<u8>> {
+    let cache_dir = crate::settings::config_dir().join("cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let safe: String = clip_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    let file = cache_dir.join(format!("prev-{safe}-{:.0}-{:.0}.mp4", start, dur));
+
+    if let Ok(b) = std::fs::read(&file) {
+        if !b.is_empty() {
+            return Ok(b);
+        }
+    }
+
+    let (vcodec, acodec) = probe_codecs(path).await;
+    let browser_safe_v = matches!(vcodec.as_deref(), Some("h264"));
+    let browser_safe_a = matches!(acodec.as_deref(), None | Some("aac") | Some("mp3"));
+    let out_path = file.to_string_lossy().to_string();
+    let (ss, t) = (format!("{start:.2}"), format!("{dur:.2}"));
+
+    let mut args: Vec<&str> = vec!["-y", "-v", "error", "-ss", &ss, "-i", path, "-t", &t];
+    if browser_safe_v && browser_safe_a {
+        // Stream copy — seeks to the nearest keyframe, so the window can be a
+        // second or two wider than the exact cut. Fine for eyeballing alignment.
+        args.extend_from_slice(&["-c", "copy", "-avoid_negative_ts", "make_zero"]);
+    } else {
+        args.extend_from_slice(&[
+            "-vf", "scale=-2:480", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+            "-c:a", "aac", "-b:a", "96k",
+        ]);
+    }
+    args.extend_from_slice(&["-movflags", "+faststart", &out_path]);
+
+    let out = tokio::process::Command::new("ffmpeg").args(&args).output().await?;
+    if !out.status.success() || std::fs::metadata(&file).map(|m| m.len() == 0).unwrap_or(true) {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let tail = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("ffmpeg failed");
+        anyhow::bail!("couldn't build a preview: {tail}");
+    }
+    Ok(std::fs::read(&file)?)
 }
 
 /// Is ffmpeg launchable? (Ok(version-ish string) or an actionable error.)

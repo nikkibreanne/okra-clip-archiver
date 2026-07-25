@@ -113,6 +113,8 @@ code { background: #0e0f14; border: 1px solid var(--line); padding: 3px 8px; bor
 .frame-picker { display: flex; align-items: center; gap: 10px; margin: 12px 0 8px; font-size: 13px; }
 .stage { position: relative; display: inline-block; max-width: 100%; user-select: none; touch-action: none; }
 .stage img { display: block; max-width: 100%; height: auto; border-radius: 8px; }
+/* same specificity trap as .player video — keep a not-yet-loaded frame hidden */
+.stage img.hidden { display: none; }
 .frame-fallback { padding: 28px; border: 1px dashed var(--line); border-radius: 8px; color: var(--warn); max-width: 60ch; }
 .box { position: absolute; border: 2px solid var(--accent); background: rgba(124, 92, 255, 0.14); cursor: move; }
 .box.bottom { border-color: var(--accent-2); background: rgba(45, 212, 191, 0.14); }
@@ -123,6 +125,44 @@ code { background: #0e0f14; border: 1px solid var(--line); padding: 3px 8px; bor
 .box-row { display: flex; align-items: center; gap: 10px; }
 .tag { font-size: 11px; text-transform: uppercase; padding: 2px 8px; border-radius: 6px; background: rgba(124, 92, 255, 0.2); }
 .tag.bottom { background: rgba(45, 212, 191, 0.2); }
+
+/* vod mapping */
+.linkish { background: none; border: 0; color: #c3c8ff; padding: 0; font-size: inherit; text-decoration: underline; cursor: pointer; }
+.vod.unmapped { border-left: 3px solid var(--warn); }
+.vod-head h3 { font-size: 14px; margin: 0; display: flex; align-items: center; gap: 8px; font-family: ui-monospace, Consolas, monospace; }
+.tagpill { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 999px; font-family: system-ui, sans-serif; }
+.tagpill.manual { background: rgba(124, 92, 255, 0.22); color: #c3b5ff; }
+.tagpill.auto { background: rgba(53, 201, 136, 0.16); color: var(--ok); }
+.tagpill.none { background: #383a46; color: var(--muted); }
+.choices { display: grid; gap: 6px; margin-top: 12px; }
+.choice { display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); cursor: pointer; }
+.choice.on { border-color: var(--accent); background: rgba(124, 92, 255, 0.1); }
+.choice input { margin-top: 3px; accent-color: var(--accent); }
+.choice-body { display: flex; flex-direction: column; gap: 1px; }
+.choice-title { font-size: 13px; }
+.offset-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; }
+.offset-row input { width: 90px; background: #16171d; color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; }
+
+/* clip preview (twitch-editor style) */
+.preview-overlay { position: fixed; inset: 0; background: rgba(8, 8, 12, 0.78); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 20; }
+.preview { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; width: min(880px, 100%); max-height: 92vh; overflow: auto; padding: 16px 18px; }
+.preview-head { display: flex; align-items: flex-start; gap: 12px; }
+.preview-head h2 { font-size: 16px; }
+.preview-head .tagpill { margin-left: 8px; }
+.player { position: relative; margin: 12px 0; background: #000; border-radius: 10px; overflow: hidden; min-height: 240px; display: flex; align-items: center; justify-content: center; }
+.player video { width: 100%; max-height: 60vh; display: block; }
+.player-note {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  background: rgba(14, 15, 20, 0.85); color: var(--muted);
+  padding: 6px 14px; border-radius: 999px; font-size: 12px; pointer-events: none; max-width: 90%;
+}
+.player-note.err { color: var(--warn); }
+.preview-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.preview-foot .muted { flex: 1; }
+
+/* uploads plan */
+.plan { margin: 10px 0 6px; padding-left: 20px; color: var(--text); font-size: 13px; display: grid; gap: 4px; }
+.plan li { padding-left: 2px; }
 
 /* settings */
 .sticky-bar {
