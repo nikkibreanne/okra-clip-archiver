@@ -7,6 +7,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+// Fields read by the upcoming precise-alignment stage (marker clip / startedAt).
+#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct SyncAnchor {
     #[serde(rename = "startedAt")]

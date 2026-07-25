@@ -20,6 +20,8 @@ pub struct Recording {
     pub duration_sec: Option<f64>,
 }
 
+// `title`/`video_id`/`url` are carried for the render/naming/upload stages.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Clip {
     pub id: String,
