@@ -49,6 +49,9 @@ struct Args {
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let args = Args::parse();
+    if args.run {
+        ensure_ffmpeg().await?; // fail fast with a clear message before any network calls
+    }
 
     let tw = twitch::Twitch::app_token(&args.client_id, &args.client_secret).await?;
     let broadcaster_id = tw.user_id(&args.channel).await?;
@@ -96,8 +99,10 @@ async fn main() -> Result<()> {
                 println!("  cut {in_sec:.2}s → {out_sec:.2}s  →  {out_path}");
                 println!("  $ {}", shell_join(ffmpeg));
                 if args.run {
-                    run_ffmpeg(ffmpeg).await?;
-                    println!("  ✓ rendered");
+                    match run_ffmpeg(ffmpeg).await {
+                        Ok(()) => println!("  ✓ rendered"),
+                        Err(e) => println!("  ✗ render failed: {e}"), // one bad clip never aborts the batch
+                    }
                 }
             }
             Plan::Skip(r) | Plan::Unmappable(r) | Plan::NoRecording(r) => {
@@ -147,6 +152,24 @@ fn scan_recordings(dir: Option<&str>) -> Vec<Recording> {
     }
     out.sort_by_key(|r| r.start_epoch_ms);
     out
+}
+
+/// Verify ffmpeg is launchable, with an actionable message if it isn't.
+async fn ensure_ffmpeg() -> Result<()> {
+    tokio::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => anyhow::anyhow!(
+                "ffmpeg not found on PATH — install it (WSL/Linux: `sudo apt install -y ffmpeg`; \
+                 Windows: put ffmpeg.exe next to this tool) then re-run"
+            ),
+            _ => anyhow::anyhow!("couldn't run ffmpeg: {e}"),
+        })?;
+    Ok(())
 }
 
 async fn run_ffmpeg(cmd: &[String]) -> Result<()> {
