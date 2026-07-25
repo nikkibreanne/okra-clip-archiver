@@ -15,6 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install NASM (needed to build aws-lc-rs / rustls on Windows)
+        uses: ilammy/setup-nasm@v1
       - name: Build release
         run: cargo build --release --locked
       - name: Test
