@@ -73,9 +73,14 @@ jobs:
             - **Installer:** `okra-clip-archiver-setup.exe` (bundles ffmpeg; adds a Start-Menu/desktop shortcut).
             - **Portable:** the `-windows.zip` (unzip and run `okra-clip-archiver.exe serve`).
 
-            Launch it and the portal opens in your browser. Everything is configured on the
-            **Settings** tab — Twitch app + source channel, recordings/output folders,
-            render quality, and the YouTube/TikTok upload targets. No file editing needed;
-            settings are saved per-user so no admin rights are required.
+            Launch it and the portal opens in your browser.
+
+            **Getting started:** Settings → *Sign in with Twitch* (you'll type a short code
+            on Twitch's own site — no passwords, no developer keys), then point it at your
+            OBS recordings folder. That's it.
+
+            Twitch clips are capped at your stream resolution; this re-cuts the same moment
+            from your local recording, so the vertical you get is as good as what you
+            recorded. Uploading to Shorts/TikTok is not built yet — see the Uploads tab.
 
             ffmpeg is bundled under GPL (`FFMPEG-LICENSE.txt`); the app itself is MIT.

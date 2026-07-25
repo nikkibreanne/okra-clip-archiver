@@ -121,6 +121,7 @@ export default function App() {
           clips={clips}
           error={clipsError}
           loading={loading}
+          status={status}
           onRefresh={refreshAll}
           onGoSettings={() => setTab('settings')}
           onGoMapping={() => setTab('mapping')}

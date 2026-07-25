@@ -81,13 +81,36 @@ impl Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     settings::load_dotenv_files();
+
+    // Double-clicked (no arguments at all) → open the portal. Anything else keeps
+    // the CLI behaviour, so `--channel x --run` still works from a terminal.
+    if std::env::args().count() == 1 {
+        settings::init(Settings::from_env());
+        banner();
+        return server::serve(8787).await;
+    }
+
     let args = Args::parse();
     settings::init(args.resolve());
 
     match args.command {
-        Some(Command::Serve { port }) => server::serve(port).await,
+        Some(Command::Serve { port }) => {
+            banner();
+            server::serve(port).await
+        }
         None => run_cli(args.run).await,
     }
+}
+
+/// Shown in the console window that Windows keeps open behind the browser, so a
+/// non-technical user knows what it is and how to quit.
+fn banner() {
+    println!("┌──────────────────────────────────────────────┐");
+    println!("│  okra-clip-archiver v{:<24}│", env!("CARGO_PKG_VERSION"));
+    println!("│  Your browser should open automatically.     │");
+    println!("│  Keep this window open while you work —      │");
+    println!("│  closing it quits the app.                   │");
+    println!("└──────────────────────────────────────────────┘");
 }
 
 async fn run_cli(run: bool) -> Result<()> {

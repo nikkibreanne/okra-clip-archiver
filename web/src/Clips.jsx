@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import ClipPreview from './ClipPreview.jsx';
 import Jobs from './Jobs.jsx';
+import Checklist from './Checklist.jsx';
 
 const LABEL = {
   ready: 'Ready',
@@ -22,7 +23,7 @@ const FILTERS = [
   { id: 'blocked', label: 'Needs attention' },
 ];
 
-export default function Clips({ clips, error, loading, onRefresh, onGoSettings, onGoMapping, previewId, onPreview }) {
+export default function Clips({ clips, error, loading, status, onRefresh, onGoSettings, onGoMapping, previewId, onPreview }) {
   const [filter, setFilter] = useState('all');
   const [queueErr, setErr] = useState(null);
 
@@ -63,16 +64,14 @@ export default function Clips({ clips, error, loading, onRefresh, onGoSettings, 
   if (loading) return <div className="panel"><p className="muted">Loading clips from Twitch…</p></div>;
 
   if (error) {
-    const notConfigured = /not configured/i.test(error);
+    if (/not configured/i.test(error)) {
+      return <Checklist status={status} onGoSettings={onGoSettings} />;
+    }
     return (
       <div className="panel empty">
-        <h2>{notConfigured ? 'Not configured yet' : 'Couldn’t load clips'}</h2>
+        <h2>Couldn’t load clips</h2>
         <p className="muted">{error}</p>
-        {notConfigured ? (
-          <button onClick={onGoSettings}>Open Settings</button>
-        ) : (
-          <button onClick={onRefresh}>Try again</button>
-        )}
+        <button onClick={onRefresh}>Try again</button>
       </div>
     );
   }

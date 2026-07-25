@@ -1,6 +1,6 @@
 [package]
 name = "okra-clip-archiver"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Pull a Twitch stream's clips and cut local 4K verticals for Shorts/TikTok"
 license = "MIT"

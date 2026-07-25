@@ -24,20 +24,36 @@ precisely — the marker clip's `vod_offset` pins the VOD timeline exactly.
 
 ## Install (Windows)
 Grab the latest [release](https://github.com/nikkibreanne/okra-clip-archiver/releases):
-the **installer** (`-setup.exe`, bundles ffmpeg) or the portable **zip**. Launch it and
-the portal opens in your browser — everything is configured on the **Settings** page.
+the **installer** (`-setup.exe`, bundles ffmpeg) or the portable **zip**.
+
+Double-click it — the portal opens in your browser and a small console window stays
+open behind it (closing that window quits the app). Then:
+
+1. **Settings → Sign in with Twitch.** You'll type a short code on Twitch's own site.
+   No passwords, no developer keys.
+2. **Point it at your OBS recordings folder.**
+3. Go to **Clips** and hit Render.
+
+The first-run screen shows these steps with ticks as you complete them.
 
 ## The portal
-`okra-clip-archiver serve` (what the shortcut runs) opens three tabs:
+`okra-clip-archiver serve` (what the shortcut runs) opens five tabs:
 
-- **Clips** — every clip in your look-back window with its status (ready / waiting on
-  VOD / no local recording), thumbnails, and a Render button per clip or for the batch.
+- **Clips** — every clip in your look-back window with thumbnails and status (ready /
+  waiting on VOD / not mapped). **Preview** plays the exact window as it will be cut
+  from your local recording; **Render** queues it. The render queue runs one job at a
+  time with live progress, encode speed, ETA, and **Cancel**.
+- **VOD mapping** — clips are matched to the recording that was rolling at the time.
+  When that guess is wrong (renamed files, clock drift, an expired VOD), pick the file
+  yourself with radio buttons and nudge the offset until cuts land where you expect.
 - **Vertical layout** — draw **two boxes** on a real frame from your recording; they're
-  stacked into a 1080×1920 vertical. Set once, reused by every render.
-- **Settings** — edits the `.env` for you: Twitch app + source channel, recordings and
-  output folders, look-back/padding/max length, render quality (CRF, preset, audio),
-  and the YouTube / TikTok upload targets. Secrets are masked; "Test Twitch
-  connection" verifies your credentials. Changes apply immediately — no restart.
+  stacked into a 1080×1920 vertical. **Lock to 9:16** keeps each box the shape of half
+  the output so nothing is stretched. Set once, reused by every render.
+- **Uploads** — what YouTube Shorts and TikTok posting will require. Not built yet.
+- **Settings** — **Sign in with Twitch** (a short code on Twitch's own site; no
+  passwords, no developer keys) plus everything else: which channel to archive,
+  recordings and output folders, look-back/padding/max length, render quality, and
+  the upload targets. Secrets are masked. Changes apply immediately — no restart.
 
 Settings are stored per-user (`%APPDATA%\okra-clip-archiver\.env`, or
 `~/.config/okra-clip-archiver/.env`), so an installed copy needs no admin rights. A
@@ -57,6 +73,9 @@ cargo run -- --channel <login> --recordings <dir>       # CLI dry-run (--run to 
 CLI flags override the saved settings for that run.
 
 ## Layout
+- `src/auth.rs` — "Sign in with Twitch" (OAuth device code flow, no client secret)
+- `src/jobs.rs` — the render queue: progress, ETA, cancellation
+- `src/mapping.rs` — manual VOD → recording overrides
 - `src/settings.rs` — settings model, `.env` round-tripping, live store (unit-tested)
 - `src/planner.rs` — pure clip→cut planning (unit-tested)
 - `src/pipeline.rs` — fetch + plan + render, shared by the CLI and the portal
@@ -64,6 +83,28 @@ CLI flags override the saved settings for that run.
 - `src/server.rs` — axum API + embedded React app
 - `src/twitch.rs` / `src/firebase.rs` — Helix reads / clipSync anchors
 - `web/` — the React portal
+
+## Troubleshooting
+
+**“Waiting on VOD”** — Twitch publishes a clip's position in the broadcast a few
+minutes after the clip is made, and only if *Store past broadcasts* is on
+(Twitch → Creator Dashboard → Settings → Stream → VOD settings). Refresh later.
+
+**“Not mapped”** — no local recording is matched to that broadcast. Open **VOD
+mapping** and pick the file yourself. This also covers renamed files, copied files
+(their timestamps change), and VODs that have already expired.
+
+**Cuts land early or late** — the mapping is on the right file but the alignment is
+off. On **VOD mapping**, adjust *“Broadcast 0:00 is at N seconds into the file”*:
+decrease it if cuts land late, increase it if they land early. Use **Preview** on a
+clip to check without spending an encode.
+
+**No clips at all** — check the channel name and the look-back window in Settings.
+Twitch only keeps VODs 14–60 days, and clips older than their VOD can't be aligned.
+
+**Renders are slow** — that's ffmpeg re-encoding. Raise *CRF* or pick a faster
+*x264 preset* in Settings → Render quality. The queue runs one job at a time on
+purpose; you can cancel any of them.
 
 ## Roadmap
 - [ ] Uploaders: YouTube Data API v3 `videos.insert`; TikTok Content Posting API
