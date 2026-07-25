@@ -49,8 +49,15 @@ impl Layout {
     }
 }
 
+/// Stored beside the .env in the per-user config dir, so an installed build under
+/// Program Files can still save it. A layout.json in the working dir still wins
+/// (handy for dev + the CLI).
 fn path() -> PathBuf {
-    PathBuf::from("layout.json")
+    let cwd = PathBuf::from("layout.json");
+    if cwd.exists() {
+        return cwd;
+    }
+    crate::settings::config_dir().join("layout.json")
 }
 
 /// The saved layout, if any (None → callers fall back to the blurred-fill default).
@@ -59,6 +66,19 @@ pub fn load() -> Option<Layout> {
 }
 
 pub fn save(layout: &Layout) -> Result<()> {
-    std::fs::write(path(), serde_json::to_string_pretty(layout)?)?;
+    let p = path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(p, serde_json::to_string_pretty(layout)?)?;
+    Ok(())
+}
+
+/// Forget the saved layout (renders fall back to the widescreen-fit default).
+pub fn clear() -> Result<()> {
+    let p = path();
+    if p.exists() {
+        std::fs::remove_file(p)?;
+    }
     Ok(())
 }

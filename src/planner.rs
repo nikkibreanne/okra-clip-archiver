@@ -41,6 +41,32 @@ pub enum Plan {
     NoRecording(String),
 }
 
+/// Everything about HOW to cut, from the user's settings.
+#[derive(Debug, Clone)]
+pub struct RenderOpts {
+    pub pad_sec: f64,
+    pub max_clip_sec: f64,
+    pub filter: String,
+    pub out_dir: String,
+    pub crf: i64,
+    pub preset: String,
+    pub audio_bitrate: String,
+}
+
+impl Default for RenderOpts {
+    fn default() -> Self {
+        Self {
+            pad_sec: 5.0,
+            max_clip_sec: 60.0,
+            filter: DEFAULT_VERTICAL_FILTER.to_string(),
+            out_dir: "out".into(),
+            crf: 18,
+            preset: "medium".into(),
+            audio_bitrate: "160k".into(),
+        }
+    }
+}
+
 /// OBS default filename ("2026-07-24 20-15-30.*") → epoch ms (local), or None.
 pub fn parse_obs_filename_epoch(name: &str) -> Option<i64> {
     let re = regex::Regex::new(r"(\d{4})-(\d{2})-(\d{2})[ _T](\d{2})-(\d{2})-(\d{2})").ok()?;
@@ -76,12 +102,10 @@ pub fn plan_clip(
     clip: &Clip,
     vod_start_epoch_ms: Option<i64>,
     recording: Option<&Recording>,
-    pad_sec: f64,
-    filter: &str,
-    out_dir: &str,
+    opts: &RenderOpts,
 ) -> Plan {
-    if clip.duration_sec > 60.0 {
-        return Plan::Skip("longer than 60s".into());
+    if clip.duration_sec > opts.max_clip_sec {
+        return Plan::Skip(format!("longer than {:.0}s", opts.max_clip_sec));
     }
     let (vod_start, vod_offset) = match (vod_start_epoch_ms, clip.vod_offset_sec) {
         (Some(s), Some(o)) => (s, o),
@@ -94,8 +118,8 @@ pub fn plan_clip(
 
     let moment_ms = vod_start + vod_offset * 1000;
     let moment_local_sec = (moment_ms - recording.start_epoch_ms) as f64 / 1000.0;
-    let in_sec = (moment_local_sec - pad_sec).max(0.0);
-    let out_sec = moment_local_sec + clip.duration_sec + pad_sec;
+    let in_sec = (moment_local_sec - opts.pad_sec).max(0.0);
+    let out_sec = moment_local_sec + clip.duration_sec + opts.pad_sec;
 
     let safe: String = clip.id.chars()
         .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
@@ -103,17 +127,17 @@ pub fn plan_clip(
     let stamp = chrono::DateTime::from_timestamp_millis(clip.created_at_ms)
         .map(|d| d.format("%Y-%m-%d-%H-%M-%S").to_string())
         .unwrap_or_else(|| clip.created_at_ms.to_string());
-    let out_path = format!("{out_dir}/{stamp}_{safe}.mp4");
+    let out_path = format!("{}/{stamp}_{safe}.mp4", opts.out_dir.trim_end_matches(['/', '\\']));
 
     let ffmpeg = vec![
         "ffmpeg".into(), "-y".into(),
         "-ss".into(), format!("{in_sec:.2}"),
         "-i".into(), recording.path.clone(),
         "-t".into(), format!("{:.2}", out_sec - in_sec),
-        "-filter_complex".into(), filter.into(),
+        "-filter_complex".into(), opts.filter.clone(),
         "-map".into(), "[v]".into(), "-map".into(), "0:a?".into(),
-        "-c:v".into(), "libx264".into(), "-crf".into(), "18".into(), "-preset".into(), "medium".into(),
-        "-c:a".into(), "aac".into(), "-b:a".into(), "160k".into(),
+        "-c:v".into(), "libx264".into(), "-crf".into(), opts.crf.to_string(), "-preset".into(), opts.preset.clone(),
+        "-c:a".into(), "aac".into(), "-b:a".into(), opts.audio_bitrate.clone(),
         out_path.clone(),
     ];
     Plan::Ready { in_sec, out_sec, local_path: recording.path.clone(), out_path, ffmpeg }
@@ -158,7 +182,7 @@ mod tests {
             id: "Clip 1!".into(), title: "t".into(), duration_sec: 20.0, vod_offset_sec: Some(100),
             video_id: Some("v1".into()), created_at_ms: base() + 100_000, url: "u".into(),
         };
-        match plan_clip(&clip, Some(base()), Some(&rec), 5.0, DEFAULT_VERTICAL_FILTER, "out") {
+        match plan_clip(&clip, Some(base()), Some(&rec), &RenderOpts::default()) {
             Plan::Ready { in_sec, out_sec, ffmpeg, out_path, .. } => {
                 assert_eq!(in_sec, 125.0); // 100s into VOD = 130s into local; −5 pad
                 assert_eq!(out_sec, 155.0);
@@ -177,10 +201,45 @@ mod tests {
             id: "x".into(), title: "t".into(), duration_sec: 20.0, vod_offset_sec: Some(100),
             video_id: Some("v1".into()), created_at_ms: base(), url: "u".into(),
         };
+        let o = RenderOpts::default();
         let long = Clip { duration_sec: 90.0, ..clip.clone() };
-        assert!(matches!(plan_clip(&long, Some(base()), None, 5.0, "", "out"), Plan::Skip(_)));
+        assert!(matches!(plan_clip(&long, Some(base()), None, &o), Plan::Skip(_)));
         let novod = Clip { vod_offset_sec: None, ..clip.clone() };
-        assert!(matches!(plan_clip(&novod, None, None, 5.0, "", "out"), Plan::Unmappable(_)));
-        assert!(matches!(plan_clip(&clip, Some(base()), None, 5.0, "", "out"), Plan::NoRecording(_)));
+        assert!(matches!(plan_clip(&novod, None, None, &o), Plan::Unmappable(_)));
+        assert!(matches!(plan_clip(&clip, Some(base()), None, &o), Plan::NoRecording(_)));
+    }
+
+    #[test]
+    fn render_opts_flow_into_the_ffmpeg_command() {
+        let rec = Recording { path: "/rec/a.mkv".into(), start_epoch_ms: base(), duration_sec: None };
+        let clip = Clip {
+            id: "x".into(), title: "t".into(), duration_sec: 10.0, vod_offset_sec: Some(0),
+            video_id: Some("v".into()), created_at_ms: base(), url: "u".into(),
+        };
+        let opts = RenderOpts {
+            crf: 23, preset: "veryfast".into(), audio_bitrate: "96k".into(),
+            out_dir: "renders/".into(), pad_sec: 0.0, ..Default::default()
+        };
+        match plan_clip(&clip, Some(base()), Some(&rec), &opts) {
+            Plan::Ready { ffmpeg, out_path, .. } => {
+                let at = |flag: &str| ffmpeg[ffmpeg.iter().position(|a| a == flag).unwrap() + 1].clone();
+                assert_eq!(at("-crf"), "23");
+                assert_eq!(at("-preset"), "veryfast");
+                assert_eq!(at("-b:a"), "96k");
+                assert!(out_path.starts_with("renders/"), "trailing slash not doubled: {out_path}");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_clip_sec_is_configurable() {
+        let clip = Clip {
+            id: "x".into(), title: "t".into(), duration_sec: 90.0, vod_offset_sec: Some(0),
+            video_id: Some("v".into()), created_at_ms: base(), url: "u".into(),
+        };
+        let rec = Recording { path: "/rec/a.mkv".into(), start_epoch_ms: base(), duration_sec: None };
+        let opts = RenderOpts { max_clip_sec: 120.0, ..Default::default() };
+        assert!(matches!(plan_clip(&clip, Some(base()), Some(&rec), &opts), Plan::Ready { .. }));
     }
 }

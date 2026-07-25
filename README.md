@@ -22,25 +22,51 @@ public-read path `clipSync/{sessionId}` = `{ startedAt, channel, markerClipId? }
 This tool reads it (`FIREBASE_DATABASE_URL`, no credentials) to align a stream
 precisely — the marker clip's `vod_offset` pins the VOD timeline exactly.
 
-## Build & run
-Needs the **Rust toolchain** (`rustup` → `cargo`) and **ffmpeg** on PATH at runtime.
+## Install (Windows)
+Grab the latest [release](https://github.com/nikkibreanne/okra-clip-archiver/releases):
+the **installer** (`-setup.exe`, bundles ffmpeg) or the portable **zip**. Launch it and
+the portal opens in your browser — everything is configured on the **Settings** page.
+
+## The portal
+`okra-clip-archiver serve` (what the shortcut runs) opens three tabs:
+
+- **Clips** — every clip in your look-back window with its status (ready / waiting on
+  VOD / no local recording), thumbnails, and a Render button per clip or for the batch.
+- **Vertical layout** — draw **two boxes** on a real frame from your recording; they're
+  stacked into a 1080×1920 vertical. Set once, reused by every render.
+- **Settings** — edits the `.env` for you: Twitch app + source channel, recordings and
+  output folders, look-back/padding/max length, render quality (CRF, preset, audio),
+  and the YouTube / TikTok upload targets. Secrets are masked; "Test Twitch
+  connection" verifies your credentials. Changes apply immediately — no restart.
+
+Settings are stored per-user (`%APPDATA%\okra-clip-archiver\.env`, or
+`~/.config/okra-clip-archiver/.env`), so an installed copy needs no admin rights. A
+`.env` next to the exe or in the working directory is also read.
+
+## Build from source
+Needs the **Rust toolchain** (`rustup` → `cargo`), **Node** (for the UI), and **ffmpeg**
+at runtime.
 
 ```bash
-cargo test          # the planner is fully unit-tested
-cargo run -- --channel <login> --days 30 --recordings /path/to/obs/recordings
-# add --run to actually render (default is a dry-run that prints ffmpeg commands)
+npm --prefix web install && npm --prefix web run build   # UI is embedded in the exe
+cargo test                                              # planner + settings unit tests
+cargo run -- serve                                      # the portal
+cargo run -- --channel <login> --recordings <dir>       # CLI dry-run (--run to render)
 ```
 
-Config via flags or env (`.env` supported): `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`,
-`TWITCH_CHANNEL`, `RECORDINGS_DIR`, `FIREBASE_DATABASE_URL`.
+CLI flags override the saved settings for that run.
 
 ## Layout
+- `src/settings.rs` — settings model, `.env` round-tripping, live store (unit-tested)
 - `src/planner.rs` — pure clip→cut planning (unit-tested)
-- `src/twitch.rs` — Helix reads (app token)
-- `src/firebase.rs` — reads the clipSync anchors
-- `src/main.rs` — dry-run/render CLI
+- `src/pipeline.rs` — fetch + plan + render, shared by the CLI and the portal
+- `src/layout.rs` — the two-box vertical layout → ffmpeg crop/vstack filter
+- `src/server.rs` — axum API + embedded React app
+- `src/twitch.rs` / `src/firebase.rs` — Helix reads / clipSync anchors
+- `web/` — the React portal
 
 ## Roadmap
-- [ ] `axum` backend serving a **React** portal (load a recording → see its clips → cut/queue)
-- [ ] Precise alignment via the marker clip (`markerClipId`)
 - [ ] Uploaders: YouTube Data API v3 `videos.insert`; TikTok Content Posting API
+      (credentials are already configurable on the Settings page)
+- [ ] Precise alignment via kennyBot's marker clip (`markerClipId`)
+- [ ] Upload queue + history

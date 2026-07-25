@@ -1,92 +1,132 @@
-import { useEffect, useState } from 'react';
-import BoxEditor from './BoxEditor.jsx';
+import { useCallback, useEffect, useState } from 'react';
+import Clips from './Clips.jsx';
+import LayoutEditor from './LayoutEditor.jsx';
+import Settings from './Settings.jsx';
 
-const LABEL = {
-  ready: 'Ready',
-  'no-recording': 'No local recording',
-  unmappable: 'Not mappable yet',
-  skip: 'Skipped',
-};
+const TABS = [
+  { id: 'clips', label: 'Clips' },
+  { id: 'layout', label: 'Vertical layout' },
+  { id: 'settings', label: 'Settings' },
+];
+
+const validTab = (t) => (TABS.some((x) => x.id === t) ? t : 'clips');
 
 export default function App() {
-  const [clips, setClips] = useState(null);
-  const [error, setError] = useState(null);
-  const [busy, setBusy] = useState({}); // id -> 'rendering' | 'done' | 'failed: …'
+  // Tab lives in the URL hash so a reload (and a deep link) keeps your place.
+  const [tab, setTabState] = useState(() => validTab(window.location.hash.slice(1)));
+  const setTab = useCallback((t) => {
+    setTabState(t);
+    if (window.location.hash.slice(1) !== t) window.location.hash = t;
+  }, []);
 
-  async function load() {
-    setError(null);
-    setClips(null);
+  useEffect(() => {
+    const onHash = () => setTabState(validTab(window.location.hash.slice(1)));
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  const [status, setStatus] = useState(null);
+  const [clips, setClips] = useState(null);
+  const [clipsError, setClipsError] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await (await fetch('/api/status')).json());
+    } catch {
+      /* status is advisory */
+    }
+  }, []);
+
+  const loadClips = useCallback(async () => {
+    setLoading(true);
+    setClipsError(null);
     try {
       const res = await fetch('/api/clips');
       if (!res.ok) throw new Error(await res.text());
       setClips(await res.json());
     } catch (e) {
-      setError(String(e.message || e));
+      setClips(null);
+      setClipsError(String(e.message || e));
+    } finally {
+      setLoading(false);
     }
-  }
-
-  useEffect(() => {
-    load();
   }, []);
 
-  async function render(id) {
-    setBusy((b) => ({ ...b, [id]: 'rendering' }));
-    try {
-      const res = await fetch('/api/render', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setBusy((b) => ({ ...b, [id]: 'done' }));
-    } catch (e) {
-      setBusy((b) => ({ ...b, [id]: 'failed: ' + (e.message || e) }));
-    }
-  }
+  useEffect(() => {
+    loadStatus();
+    loadClips();
+  }, [loadStatus, loadClips]);
 
-  const ready = clips?.filter((c) => c.status === 'ready').length ?? 0;
+  const refreshAll = useCallback(() => {
+    loadStatus();
+    loadClips();
+  }, [loadStatus, loadClips]);
 
   return (
     <div className="wrap">
       <header>
-        <h1>okra-clip-archiver</h1>
-        <button onClick={load} disabled={!clips && !error}>Refresh</button>
+        <div className="brand">
+          <h1>okra-clip-archiver</h1>
+          {status?.version && <span className="ver">v{status.version}</span>}
+        </div>
+        <div className="grow" />
+        <button className="ghost" onClick={refreshAll} disabled={loading}>
+          {loading ? 'Loading…' : 'Refresh'}
+        </button>
       </header>
 
-      {error && <p className="error">Couldn’t load clips: {error}</p>}
-      {!clips && !error && <p className="muted">Loading clips…</p>}
-      {clips && <p className="muted">{clips.length} clips ≤60s · {ready} ready to render</p>}
+      {status && (
+        <div className="statusbar">
+          <Chip
+            ok={status.configured}
+            label={status.configured ? `channel: ${status.channel}` : 'no channel set'}
+            onClick={() => setTab('settings')}
+          />
+          <Chip
+            ok={status.recordings_found > 0}
+            label={
+              status.recordings_dir
+                ? `${status.recordings_found} recording${status.recordings_found === 1 ? '' : 's'}`
+                : 'no recordings folder'
+            }
+            onClick={() => setTab('settings')}
+          />
+          <Chip ok={status.ffmpeg_ok} label={status.ffmpeg_ok ? 'ffmpeg ready' : 'ffmpeg missing'} title={status.ffmpeg} />
+          <Chip ok={status.has_layout} label={status.has_layout ? 'custom layout' : 'default layout'} onClick={() => setTab('layout')} />
+          <span className="grow" />
+          <span className="muted tiny">last {status.days} days → {status.out_dir}</span>
+        </div>
+      )}
 
-      <BoxEditor />
-
-      <ul className="clips">
-        {clips?.map((c) => (
-          <li key={c.id} className="clip">
-            <div className="meta">
-              <a href={c.url} target="_blank" rel="noreferrer">{c.title || c.id}</a>
-              <span className="dur">{Math.round(c.duration)}s</span>
-              <span className={`badge ${c.status}`}>{LABEL[c.status] || c.status}</span>
-            </div>
-            {c.status === 'ready' ? (
-              <div className="actions">
-                <code title={c.out_path}>{c.out_path}</code>
-                <button className="render" disabled={busy[c.id] === 'rendering'} onClick={() => render(c.id)}>
-                  {busy[c.id] === 'rendering'
-                    ? 'Rendering…'
-                    : busy[c.id] === 'done'
-                    ? '✓ Rendered'
-                    : 'Render vertical'}
-                </button>
-                {typeof busy[c.id] === 'string' && busy[c.id].startsWith('failed') && (
-                  <span className="error">{busy[c.id]}</span>
-                )}
-              </div>
-            ) : (
-              <div className="actions muted">{c.reason}</div>
-            )}
-          </li>
+      <nav className="tabs">
+        {TABS.map((t) => (
+          <button key={t.id} className={`tab ${tab === t.id ? 'on' : ''}`} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
         ))}
-      </ul>
+      </nav>
+
+      {tab === 'clips' && (
+        <Clips
+          clips={clips}
+          error={clipsError}
+          loading={loading}
+          onRefresh={refreshAll}
+          onGoSettings={() => setTab('settings')}
+        />
+      )}
+      {tab === 'layout' && <LayoutEditor clips={clips} onGoSettings={() => setTab('settings')} />}
+      {tab === 'settings' && <Settings onSaved={refreshAll} />}
     </div>
+  );
+}
+
+function Chip({ ok, label, title, onClick }) {
+  return (
+    <button className={`stat ${ok ? 'good' : 'bad'}`} title={title} onClick={onClick} disabled={!onClick}>
+      <span className="dot" />
+      {label}
+    </button>
   );
 }

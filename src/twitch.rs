@@ -19,6 +19,10 @@ pub struct ClipDto {
     pub video_id: String,
     #[serde(default)]
     pub vod_offset: Option<i64>,
+    #[serde(default)]
+    pub thumbnail_url: String,
+    #[serde(default)]
+    pub creator_name: String,
 }
 
 impl Twitch {

@@ -1,41 +1,16 @@
 //! Shared pipeline used by BOTH the CLI and the web server: fetch a channel's
 //! clips, plan each against the local recordings, and render on demand. Keeping
 //! this in one place means the GUI and the terminal produce identical results.
+//! Every knob comes from `Settings` (see settings.rs), so a change on the
+//! Settings page takes effect on the next request.
 
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-use crate::planner::{find_recording, parse_obs_filename_epoch, plan_clip, Clip, Plan, Recording, DEFAULT_VERTICAL_FILTER};
+use crate::planner::{find_recording, parse_obs_filename_epoch, plan_clip, Clip, Plan, Recording, RenderOpts, DEFAULT_VERTICAL_FILTER};
+use crate::settings::Settings;
 use crate::twitch::{ClipDto, Twitch};
-
-/// Everything the pipeline needs; built from CLI args or the server config.
-#[derive(Clone)]
-pub struct Cfg {
-    pub channel: Option<String>,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub recordings: Option<String>,
-    pub days: i64,
-    pub pad: f64,
-    pub out_dir: String,
-    pub firebase_url: Option<String>,
-}
-
-impl Cfg {
-    /// (client_id, client_secret, channel), or an error naming what's unset — so
-    /// the portal can launch unconfigured and surface a clear message.
-    fn creds(&self) -> Result<(&str, &str, &str)> {
-        let mut missing = Vec::new();
-        if self.client_id.is_none() { missing.push("TWITCH_CLIENT_ID"); }
-        if self.client_secret.is_none() { missing.push("TWITCH_CLIENT_SECRET"); }
-        if self.channel.is_none() { missing.push("TWITCH_CHANNEL"); }
-        if !missing.is_empty() {
-            anyhow::bail!("not configured — set {} (in a .env next to the app, or via flags)", missing.join(", "));
-        }
-        Ok((self.client_id.as_deref().unwrap(), self.client_secret.as_deref().unwrap(), self.channel.as_deref().unwrap()))
-    }
-}
 
 /// One clip's plan, JSON-serialized for the web UI.
 #[derive(Serialize, Clone)]
@@ -43,6 +18,9 @@ pub struct PlanRow {
     pub id: String,
     pub title: String,
     pub url: String,
+    pub thumbnail_url: String,
+    pub creator: String,
+    pub created_at: String,
     pub duration: f64,
     pub status: String, // ready | skip | unmappable | no-recording
     pub reason: Option<String>,
@@ -52,19 +30,33 @@ pub struct PlanRow {
     pub out_path: Option<String>,
     pub ffmpeg: Option<Vec<String>>,
     pub vod_offset: Option<i64>,
+    /// True when out_path already exists on disk (already rendered).
+    pub rendered: bool,
 }
 
-/// Fetch + plan every ≤60s clip for the channel.
-pub async fn plan_rows(cfg: &Cfg) -> Result<Vec<PlanRow>> {
-    let (client_id, client_secret, channel) = cfg.creds()?;
+/// Build the ffmpeg options for the current settings + saved layout.
+pub fn render_opts(s: &Settings) -> RenderOpts {
+    RenderOpts {
+        pad_sec: s.pad_sec,
+        max_clip_sec: s.max_clip_sec,
+        filter: crate::layout::load().map(|l| l.filter()).unwrap_or_else(|| DEFAULT_VERTICAL_FILTER.to_string()),
+        out_dir: s.out_dir.clone(),
+        crf: s.video_crf,
+        preset: s.video_preset.clone(),
+        audio_bitrate: s.audio_bitrate.clone(),
+    }
+}
+
+/// Fetch + plan every clip for the configured channel.
+pub async fn plan_rows(s: &Settings) -> Result<Vec<PlanRow>> {
+    let (client_id, client_secret, channel) = s.twitch_creds()?;
     let tw = Twitch::app_token(client_id, client_secret).await?;
     let broadcaster_id = tw.user_id(channel).await?;
 
     let now = chrono::Utc::now();
-    let started_at = (now - chrono::Duration::days(cfg.days)).to_rfc3339();
+    let started_at = (now - chrono::Duration::days(s.days)).to_rfc3339();
     let ended_at = now.to_rfc3339();
-    let mut clips = tw.clips(&broadcaster_id, &started_at, &ended_at).await?;
-    clips.retain(|c| c.duration <= 60.0);
+    let clips = tw.clips(&broadcaster_id, &started_at, &ended_at).await?;
 
     // VOD start times, one lookup per unique video id (the timeline anchor).
     let mut vod_start: HashMap<String, i64> = HashMap::new();
@@ -75,27 +67,33 @@ pub async fn plan_rows(cfg: &Cfg) -> Result<Vec<PlanRow>> {
         }
     }
 
-    let recordings = scan_recordings(cfg.recordings.as_deref());
-
-    // The saved two-box layout, if any; otherwise the blurred-fill fallback.
-    let filter = crate::layout::load().map(|l| l.filter()).unwrap_or_else(|| DEFAULT_VERTICAL_FILTER.to_string());
+    let recordings = scan_recordings(s.recordings_dir.as_str());
+    let opts = render_opts(s);
 
     let mut rows = Vec::new();
     for c in &clips {
         let clip = to_clip(c);
         let vs = vod_start.get(&c.video_id).copied();
-        let moment = match (vs, c.vod_offset) { (Some(s), Some(o)) => Some(s + o * 1000), _ => None };
+        let moment = match (vs, c.vod_offset) { (Some(st), Some(o)) => Some(st + o * 1000), _ => None };
         let rec = moment.and_then(|m| find_recording(&recordings, m));
-        let plan = plan_clip(&clip, vs, rec, cfg.pad, &filter, &cfg.out_dir);
+        let plan = plan_clip(&clip, vs, rec, &opts);
 
         let mut row = PlanRow {
-            id: c.id.clone(), title: c.title.clone(), url: c.url.clone(), duration: c.duration,
+            id: c.id.clone(),
+            title: c.title.trim().to_string(),
+            url: c.url.clone(),
+            thumbnail_url: c.thumbnail_url.clone(),
+            creator: c.creator_name.clone(),
+            created_at: c.created_at.clone(),
+            duration: c.duration,
             status: String::new(), reason: None, in_sec: None, out_sec: None,
             local_path: None, out_path: None, ffmpeg: None, vod_offset: c.vod_offset,
+            rendered: false,
         };
         match plan {
             Plan::Ready { in_sec, out_sec, local_path, out_path, ffmpeg } => {
                 row.status = "ready".into();
+                row.rendered = std::path::Path::new(&out_path).exists();
                 row.in_sec = Some(in_sec);
                 row.out_sec = Some(out_sec);
                 row.local_path = Some(local_path);
@@ -113,43 +111,52 @@ pub async fn plan_rows(cfg: &Cfg) -> Result<Vec<PlanRow>> {
 
 /// Render one planned (ready) clip with ffmpeg.
 pub async fn render(row: &PlanRow) -> Result<()> {
-    let cmd = row.ffmpeg.as_ref().ok_or_else(|| anyhow::anyhow!("clip is not renderable ({})", row.status))?;
+    let cmd = row.ffmpeg.as_ref().ok_or_else(|| anyhow::anyhow!("this clip can't be rendered ({})", row.status))?;
     if let Some(parent) = std::path::Path::new(cmd.last().unwrap()).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let status = tokio::process::Command::new(&cmd[0]).args(&cmd[1..]).status().await?;
-    anyhow::ensure!(status.success(), "ffmpeg exited with {status}");
+    let out = tokio::process::Command::new(&cmd[0]).args(&cmd[1..]).output().await?;
+    if !out.status.success() {
+        // ffmpeg's last stderr line is the useful part — surface it in the UI.
+        let err = String::from_utf8_lossy(&out.stderr);
+        let tail = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("ffmpeg failed");
+        anyhow::bail!("{tail}");
+    }
     Ok(())
 }
 
 /// Extract a single JPEG frame from a recording at time `t` (seconds) — the
-/// backdrop the layout editor draws the two boxes on. Returns the JPEG bytes.
+/// backdrop the layout editor draws the two boxes on.
 pub async fn extract_frame(path: &str, t: f64) -> Result<Vec<u8>> {
     let out = tokio::process::Command::new("ffmpeg")
         .args(["-ss", &format!("{t:.2}"), "-i", path, "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"])
         .output()
         .await?;
-    anyhow::ensure!(out.status.success(), "ffmpeg frame extract failed");
+    anyhow::ensure!(out.status.success(), "ffmpeg couldn't read a frame from {path}");
     anyhow::ensure!(!out.stdout.is_empty(), "ffmpeg produced no frame");
     Ok(out.stdout)
 }
 
-/// Verify ffmpeg is launchable, with an actionable message if it isn't.
-pub async fn ensure_ffmpeg() -> Result<()> {
-    tokio::process::Command::new("ffmpeg")
+/// Is ffmpeg launchable? (Ok(version-ish string) or an actionable error.)
+pub async fn ffmpeg_version() -> Result<String> {
+    let out = tokio::process::Command::new("ffmpeg")
         .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .await
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => anyhow::anyhow!(
-                "ffmpeg not found on PATH — install it (WSL/Linux: `sudo apt install -y ffmpeg`; \
-                 Windows: put ffmpeg.exe next to this tool) then re-run"
+                "ffmpeg not found — install it (Linux/WSL: `sudo apt install -y ffmpeg`; \
+                 Windows: keep ffmpeg.exe next to the app)"
             ),
             _ => anyhow::anyhow!("couldn't run ffmpeg: {e}"),
         })?;
-    Ok(())
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text.lines().next().unwrap_or("ffmpeg").to_string())
+}
+
+/// CLI helper: fail fast with a clear message.
+pub async fn ensure_ffmpeg() -> Result<()> {
+    ffmpeg_version().await.map(|_| ())
 }
 
 fn to_clip(c: &ClipDto) -> Clip {
@@ -164,9 +171,13 @@ fn to_clip(c: &ClipDto) -> Clip {
     }
 }
 
-fn scan_recordings(dir: Option<&str>) -> Vec<Recording> {
+/// Video files in `dir`, with their start time from the OBS filename (preferred)
+/// or the file's mtime.
+pub fn scan_recordings(dir: &str) -> Vec<Recording> {
     let mut out = Vec::new();
-    let Some(dir) = dir else { return out };
+    if dir.trim().is_empty() {
+        return out;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else { return out };
     for entry in rd.flatten() {
         let path = entry.path();
