@@ -36,6 +36,7 @@ pub struct DeviceStart {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)] // expires_in is informational; we refresh reactively on 401
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]

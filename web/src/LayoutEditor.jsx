@@ -2,37 +2,40 @@ import { useEffect, useRef, useState } from 'react';
 
 const OUT_W = 1080;
 const OUT_H = 1920;
-// Each box fills HALF the 9:16 output, so a box that is 1080x960 (9:8) maps in
-// with no stretching. Locking to this is the sane default; unlocking lets you
-// crop a different shape and accept that it gets squeezed to fit.
+// Each box fills HALF the 9:16 output, i.e. a 1080x960 slot (9:8). A crop with
+// that same shape maps in with no stretching — that's what "lock" enforces.
 const HALF_ASPECT = OUT_W / (OUT_H / 2); // 1.125
 
-function defaultBoxes(w, h) {
-  return { top: { x: 0, y: 0, w, h: h / 2 }, bottom: { x: 0, y: h / 2, w, h: h / 2 } };
-}
-
-/** Aspect-correct a box against a known display size (used before state exists). */
-function clampTo(b, d) {
-  let w = Math.min(b.w, d.w);
-  let h = w / HALF_ASPECT;
-  if (h > d.h) {
-    h = d.h;
-    w = h * HALF_ASPECT;
-  }
-  return { x: Math.max(0, Math.min(b.x, d.w - w)), y: Math.max(0, Math.min(b.y, d.h - h)), w, h };
-}
-
 /**
- * Two-box vertical layout editor. Boxes are kept in DISPLAY pixels while editing
- * and converted to SOURCE pixels on save, so the same layout works regardless of
- * how large the preview is drawn.
+ * Boxes are stored NORMALIZED (0..1 of the frame), never in screen pixels. That
+ * keeps them correct when the window resizes, when the preview is drawn at a
+ * different size than it was drawn at last time, and when converting to source
+ * pixels on save. Aspect locking has to account for the frame's own aspect:
+ * a box that is `w` wide in normalized units is `w * frameW` px wide, so for a
+ * 9:8 pixel shape its normalized height is `w * frameAspect / HALF_ASPECT`.
  */
+const lockedH = (w, frameAspect) => (w * frameAspect) / HALF_ASPECT;
+
+/** Two distinct, non-overlapping starting boxes that both fit in any frame. */
+function defaultBoxes(frameAspect, locked) {
+  if (!locked) {
+    return { top: { x: 0, y: 0, w: 1, h: 0.5 }, bottom: { x: 0, y: 0.5, w: 1, h: 0.5 } };
+  }
+  let w = 0.5;
+  let h = lockedH(w, frameAspect);
+  if (h > 1) {
+    h = 1;
+    w = h / frameAspect * HALF_ASPECT;
+  }
+  return { top: { x: 0, y: 0, w, h }, bottom: { x: 1 - w, y: 1 - h, w, h } };
+}
+
 export default function LayoutEditor({ clips, onGoSettings }) {
   const imgRef = useRef(null);
   const drag = useRef(null);
-  const [display, setDisplay] = useState(null);
-  const [natural, setNatural] = useState(null);
-  const [boxes, setBoxes] = useState(null);
+  const [display, setDisplay] = useState(null); // rendered size, for px<->normalized
+  const [natural, setNatural] = useState(null); // source frame size
+  const [boxes, setBoxes] = useState(null); // normalized
   const [saved, setSaved] = useState(null);
   const [frameId, setFrameId] = useState('');
   const [note, setNote] = useState(null);
@@ -40,64 +43,76 @@ export default function LayoutEditor({ clips, onGoSettings }) {
   const [locked, setLocked] = useState(true);
 
   const readyClips = (clips || []).filter((c) => c.status === 'ready');
+  const frameAspect = natural ? natural.w / natural.h : 16 / 9;
 
   useEffect(() => {
-    fetch('/api/layout')
-      .then((r) => r.json())
-      .then(setSaved)
-      .catch(() => {});
+    fetch('/api/layout').then((r) => r.json()).then(setSaved).catch(() => {});
   }, []);
 
-  // Apply a saved layout once the display scale is known (either load order).
+  // A saved layout is in SOURCE px → normalize it.
   useEffect(() => {
-    if (saved?.source_w && display) {
-      const sx = display.w / saved.source_w;
-      const sy = display.h / saved.source_h;
-      const conv = (r) => ({ x: r.x * sx, y: r.y * sy, w: r.w * sx, h: r.h * sy });
-      setBoxes({ top: conv(saved.top), bottom: conv(saved.bottom) });
+    if (saved?.source_w) {
+      const n = (r) => ({
+        x: r.x / saved.source_w,
+        y: r.y / saved.source_h,
+        w: r.w / saved.source_w,
+        h: r.h / saved.source_h,
+      });
+      setBoxes({ top: n(saved.top), bottom: n(saved.bottom) });
     }
-  }, [saved, display]);
+  }, [saved]);
+
+  // Track the rendered size so drags convert correctly at any window size.
+  useEffect(() => {
+    const el = imgRef.current;
+    if (!el || frameState !== 'ok') return undefined;
+    const measure = () => setDisplay({ w: el.offsetWidth, h: el.offsetHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [frameState]);
 
   function onImgLoad() {
     const img = imgRef.current;
     if (!img?.naturalWidth) return;
-    const d = { w: img.offsetWidth, h: img.offsetHeight };
-    setDisplay(d);
     setNatural({ w: img.naturalWidth, h: img.naturalHeight });
-    setBoxes((b) => {
-      if (b) return b;
-      const init = defaultBoxes(d.w, d.h);
-      return locked
-        ? { top: clampTo(init.top, d), bottom: clampTo(init.bottom, d) }
-        : init;
-    });
+    setDisplay({ w: img.offsetWidth, h: img.offsetHeight });
     setFrameState('ok');
+    setBoxes((b) => b || defaultBoxes(img.naturalWidth / img.naturalHeight, locked));
   }
 
-  /** Keep a box on-screen; when locked, hold it at the 9:8 half-frame aspect. */
+  /** Keep a normalized box inside the frame; when locked, hold the 9:8 shape. */
   function clamp(box, keepAspect = locked) {
-    if (!display) return box;
     let { x, y, w, h } = box;
-    w = Math.max(24, Math.min(w, display.w));
-    h = Math.max(24, Math.min(h, display.h));
+    w = Math.min(Math.max(w, 0.05), 1);
+    h = Math.min(Math.max(h, 0.05), 1);
     if (keepAspect) {
-      // Width leads; if that makes the box taller than the frame, height leads.
-      h = w / HALF_ASPECT;
-      if (h > display.h) {
-        h = display.h;
-        w = h * HALF_ASPECT;
+      h = lockedH(w, frameAspect);
+      if (h > 1) {
+        h = 1;
+        w = (h / frameAspect) * HALF_ASPECT;
       }
     }
-    x = Math.max(0, Math.min(x, display.w - w));
-    y = Math.max(0, Math.min(y, display.h - h));
+    x = Math.min(Math.max(x, 0), 1 - w);
+    y = Math.min(Math.max(y, 0), 1 - h);
     return { x, y, w, h };
   }
 
-  /** Re-apply the lock to both boxes (used when the toggle is switched on). */
   function relock(on) {
     setLocked(on);
-    if (on && boxes) {
-      setBoxes({ top: clamp(boxes.top, true), bottom: clamp(boxes.bottom, true) });
+    if (boxes) {
+      const fix = (b) => {
+        if (!on) return b;
+        let w = b.w;
+        let h = lockedH(w, frameAspect);
+        if (h > 1) {
+          h = 1;
+          w = (h / frameAspect) * HALF_ASPECT;
+        }
+        return clamp({ ...b, w, h }, false);
+      };
+      setBoxes({ top: fix(boxes.top), bottom: fix(boxes.bottom) });
     }
   }
 
@@ -108,41 +123,54 @@ export default function LayoutEditor({ clips, onGoSettings }) {
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }
+
   function onMove(e) {
     const d = drag.current;
-    if (!d) return;
-    const dx = e.clientX - d.startX;
-    const dy = e.clientY - d.startY;
+    if (!d || !display) return;
+    const dx = (e.clientX - d.startX) / display.w; // normalized deltas
+    const dy = (e.clientY - d.startY) / display.h;
     const o = d.orig;
-    const next = d.mode === 'move'
-      ? { x: o.x + dx, y: o.y + dy, w: o.w, h: o.h }
-      : { x: o.x, y: o.y, w: o.w + dx, h: o.h + dy };
+    let next;
+    if (d.mode === 'move') {
+      next = { ...o, x: o.x + dx, y: o.y + dy };
+    } else if (locked) {
+      // Locked: either direction grows the box, so a mostly-vertical drag still works.
+      const grow = Math.abs(dy * frameAspect) > Math.abs(dx) ? (dy * frameAspect) / HALF_ASPECT : dx;
+      next = { ...o, w: o.w + grow };
+    } else {
+      next = { ...o, w: o.w + dx, h: o.h + dy };
+    }
     setBoxes((b) => ({ ...b, [d.which]: clamp(next) }));
   }
+
   function onUp() {
     drag.current = null;
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
   }
 
-  function nudge(which, patch) {
-    setBoxes((b) => ({ ...b, [which]: clamp({ ...b[which], ...patch }) }));
-  }
+  const nudge = (which, patch) => setBoxes((b) => ({ ...b, [which]: clamp({ ...b[which], ...patch }) }));
 
   async function save() {
-    if (!boxes || !natural || !display) return;
-    const sx = natural.w / display.w;
-    const sy = natural.h / display.h;
-    const conv = (r) => ({ x: r.x * sx, y: r.y * sy, w: r.w * sx, h: r.h * sy });
+    if (!boxes || !natural) return;
+    const px = (r) => ({
+      x: r.x * natural.w,
+      y: r.y * natural.h,
+      w: r.w * natural.w,
+      h: r.h * natural.h,
+    });
     setNote(null);
     try {
       const res = await fetch('/api/layout', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          source_w: natural.w, source_h: natural.h,
-          top: conv(boxes.top), bottom: conv(boxes.bottom),
-          out_w: OUT_W, out_h: OUT_H,
+          source_w: natural.w,
+          source_h: natural.h,
+          top: px(boxes.top),
+          bottom: px(boxes.bottom),
+          out_w: OUT_W,
+          out_h: OUT_H,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -155,11 +183,10 @@ export default function LayoutEditor({ clips, onGoSettings }) {
   async function reset() {
     await fetch('/api/layout', { method: 'DELETE' }).catch(() => {});
     setSaved(null);
-    setBoxes(display ? defaultBoxes(display.w, display.h) : null);
+    setBoxes(defaultBoxes(frameAspect, locked));
     setNote({ kind: 'ok', text: 'Layout cleared — renders fall back to the widescreen fit.' });
   }
 
-  // No mappable clip → explain instead of showing a broken image.
   if (!readyClips.length) {
     return (
       <div className="panel empty">
@@ -174,6 +201,7 @@ export default function LayoutEditor({ clips, onGoSettings }) {
   }
 
   const src = `/api/frame${frameId ? `?id=${encodeURIComponent(frameId)}` : ''}`;
+  const pct = (v) => `${(v * 100).toFixed(2)}%`;
 
   return (
     <section className="panel">
@@ -185,7 +213,7 @@ export default function LayoutEditor({ clips, onGoSettings }) {
             output, the <b>bottom</b> box the lower half. Set it once — every render reuses it.
           </p>
         </div>
-        <label className="lock" title="Keep each box at the shape of half a 9:16 video, so nothing is stretched when it is stacked.">
+        <label className="lock" title="Keep each box shaped like half of a 9:16 video, so nothing gets stretched when the two are stacked.">
           <input type="checkbox" checked={locked} onChange={(e) => relock(e.target.checked)} />
           <span>Lock to 9:16</span>
         </label>
@@ -214,14 +242,7 @@ export default function LayoutEditor({ clips, onGoSettings }) {
       </div>
 
       <div className="stage">
-        <img
-          ref={imgRef}
-          src={src}
-          alt=""
-          className={frameState === 'ok' ? '' : 'hidden'}
-          onLoad={onImgLoad}
-          onError={() => setFrameState('error')}
-        />
+        <img ref={imgRef} src={src} alt="" onLoad={onImgLoad} onError={() => setFrameState('error')} />
         {frameState === 'error' && (
           <div className="frame-fallback">
             Couldn’t extract a preview frame. Check that ffmpeg is available and the recording file is readable.
@@ -233,7 +254,12 @@ export default function LayoutEditor({ clips, onGoSettings }) {
             <div
               key={which}
               className={`box ${which}`}
-              style={{ left: boxes[which].x, top: boxes[which].y, width: boxes[which].w, height: boxes[which].h }}
+              style={{
+                left: pct(boxes[which].x),
+                top: pct(boxes[which].y),
+                width: pct(boxes[which].w),
+                height: pct(boxes[which].h),
+              }}
               onPointerDown={(e) => startDrag(e, which, 'move')}
             >
               <span className="box-label">{which}</span>
@@ -242,25 +268,40 @@ export default function LayoutEditor({ clips, onGoSettings }) {
           ))}
       </div>
 
-      {frameState === 'ok' && boxes && natural && display && (
+      {frameState === 'ok' && boxes && natural && (
         <div className="box-numbers">
           {['top', 'bottom'].map((which) => {
-            const sx = natural.w / display.w;
-            const sy = natural.h / display.h;
             const b = boxes[which];
             return (
               <div className="box-row" key={which}>
                 <span className={`tag ${which}`}>{which}</span>
                 <span className="mono tiny">
-                  {Math.round(b.w * sx)}×{Math.round(b.h * sy)} at {Math.round(b.x * sx)},{Math.round(b.y * sy)} (source px)
+                  {Math.round(b.w * natural.w)}×{Math.round(b.h * natural.h)} at {Math.round(b.x * natural.w)},
+                  {Math.round(b.y * natural.h)}
                 </span>
-                <button className="tiny-btn" onClick={() => nudge(which, { x: 0, w: display.w })} title="Span the full width of the frame">full width</button>
+                <button className="tiny-btn" onClick={() => nudge(which, { x: 0, w: 1 })} title="Span the full width of the frame">
+                  full width
+                </button>
+                <button
+                  className="tiny-btn"
+                  onClick={() => nudge(which, { x: (1 - b.w) / 2 })}
+                  title="Centre this box horizontally"
+                >
+                  centre
+                </button>
                 {!locked && (
-                  <button className="tiny-btn" onClick={() => nudge(which, { h: display.h / 2 })} title="Set this box to half the frame height">half height</button>
+                  <button className="tiny-btn" onClick={() => nudge(which, { h: 0.5 })} title="Half the frame height">
+                    half height
+                  </button>
                 )}
               </div>
             );
           })}
+          <p className="muted tiny">
+            {locked
+              ? 'Locked: each box keeps the shape of half a 9:16 video, so the stack is never stretched.'
+              : 'Unlocked: boxes can be any shape — they’ll be squeezed to fit their half of the output.'}
+          </p>
         </div>
       )}
     </section>

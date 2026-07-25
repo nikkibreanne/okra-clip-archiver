@@ -28,6 +28,11 @@ jobs:
       - name: Install NASM (needed to build aws-lc-rs / rustls on Windows)
         uses: ilammy/setup-nasm@v1
       - name: Build release exe
+        # The Twitch client ID is a PUBLIC identifier (it appears in every OAuth
+        # URL); baking it in is what makes one-click "Sign in with Twitch" work.
+        # No client secret is involved — the app uses the device code flow.
+        env:
+          OKRA_TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
         run: cargo build --release --locked
 
       - name: Fetch static ffmpeg
