@@ -29,6 +29,8 @@ pub async fn serve(cfg: Cfg, port: u16) -> Result<()> {
     let app = Router::new()
         .route("/api/clips", get(clips))
         .route("/api/render", post(render))
+        .route("/api/layout", get(get_layout).post(post_layout))
+        .route("/api/frame", get(frame))
         .fallback_service(ServeDir::new(&web))
         .with_state(state);
 
@@ -78,6 +80,28 @@ async fn render(State(s): State<AppState>, Json(req): Json<RenderReq>) -> Result
         .ok_or_else(|| anyhow::anyhow!("clip not found"))?;
     pipeline::render(&row).await?;
     Ok(Json(serde_json::json!({ "ok": true, "out": row.out_path })))
+}
+
+async fn get_layout() -> Json<Option<crate::layout::Layout>> {
+    Json(crate::layout::load())
+}
+
+async fn post_layout(Json(l): Json<crate::layout::Layout>) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::layout::save(&l)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// A JPEG frame from the first ready clip's recording — the layout editor backdrop.
+async fn frame(State(s): State<AppState>) -> Result<axum::response::Response, ApiError> {
+    let rows = pipeline::plan_rows(&s.cfg).await?;
+    let ready = rows
+        .iter()
+        .find(|r| r.status == "ready")
+        .ok_or_else(|| anyhow::anyhow!("no ready clip to preview — pass --recordings so a clip maps to a recording"))?;
+    let path = ready.local_path.clone().unwrap();
+    let mid = ((ready.in_sec.unwrap_or(0.0) + ready.out_sec.unwrap_or(0.0)) / 2.0).max(0.0);
+    let jpeg = pipeline::extract_frame(&path, mid).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response())
 }
 
 /// Turn any pipeline error into a 500 with the message (the UI shows it).

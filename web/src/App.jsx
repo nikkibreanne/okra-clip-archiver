@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import BoxEditor from './BoxEditor.jsx';
 
 const LABEL = {
   ready: 'Ready',
@@ -55,6 +56,8 @@ export default function App() {
       {error && <p className="error">Couldn’t load clips: {error}</p>}
       {!clips && !error && <p className="muted">Loading clips…</p>}
       {clips && <p className="muted">{clips.length} clips ≤60s · {ready} ready to render</p>}
+
+      <BoxEditor />
 
       <ul className="clips">
         {clips?.map((c) => (

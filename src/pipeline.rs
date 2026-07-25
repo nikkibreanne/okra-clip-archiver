@@ -61,13 +61,16 @@ pub async fn plan_rows(cfg: &Cfg) -> Result<Vec<PlanRow>> {
 
     let recordings = scan_recordings(cfg.recordings.as_deref());
 
+    // The saved two-box layout, if any; otherwise the blurred-fill fallback.
+    let filter = crate::layout::load().map(|l| l.filter()).unwrap_or_else(|| DEFAULT_VERTICAL_FILTER.to_string());
+
     let mut rows = Vec::new();
     for c in &clips {
         let clip = to_clip(c);
         let vs = vod_start.get(&c.video_id).copied();
         let moment = match (vs, c.vod_offset) { (Some(s), Some(o)) => Some(s + o * 1000), _ => None };
         let rec = moment.and_then(|m| find_recording(&recordings, m));
-        let plan = plan_clip(&clip, vs, rec, cfg.pad, DEFAULT_VERTICAL_FILTER, &cfg.out_dir);
+        let plan = plan_clip(&clip, vs, rec, cfg.pad, &filter, &cfg.out_dir);
 
         let mut row = PlanRow {
             id: c.id.clone(), title: c.title.clone(), url: c.url.clone(), duration: c.duration,
@@ -101,6 +104,18 @@ pub async fn render(row: &PlanRow) -> Result<()> {
     let status = tokio::process::Command::new(&cmd[0]).args(&cmd[1..]).status().await?;
     anyhow::ensure!(status.success(), "ffmpeg exited with {status}");
     Ok(())
+}
+
+/// Extract a single JPEG frame from a recording at time `t` (seconds) — the
+/// backdrop the layout editor draws the two boxes on. Returns the JPEG bytes.
+pub async fn extract_frame(path: &str, t: f64) -> Result<Vec<u8>> {
+    let out = tokio::process::Command::new("ffmpeg")
+        .args(["-ss", &format!("{t:.2}"), "-i", path, "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"])
+        .output()
+        .await?;
+    anyhow::ensure!(out.status.success(), "ffmpeg frame extract failed");
+    anyhow::ensure!(!out.stdout.is_empty(), "ffmpeg produced no frame");
+    Ok(out.stdout)
 }
 
 /// Verify ffmpeg is launchable, with an actionable message if it isn't.

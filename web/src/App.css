@@ -49,3 +49,15 @@ code {
 }
 .render { white-space: nowrap; }
 .error { color: #ff8a8a; }
+
+/* ── layout editor ── */
+.editor { background: #1d1e26; border: 1px solid #2a2b36; border-radius: 12px; padding: 14px 16px; margin: 16px 0; }
+.editor-head { display: flex; align-items: center; gap: 12px; }
+.editor-head h2 { font-size: 15px; margin: 0; flex: 1; }
+.stage { position: relative; display: inline-block; max-width: 100%; margin-top: 8px; user-select: none; touch-action: none; }
+.stage img { display: block; max-width: 100%; height: auto; border-radius: 8px; }
+.box { position: absolute; border: 2px solid #7c5cff; background: rgba(124, 92, 255, 0.12); cursor: move; box-sizing: border-box; }
+.box.bottom { border-color: #2dd4bf; background: rgba(45, 212, 191, 0.12); }
+.box-label { position: absolute; top: 2px; left: 5px; font-size: 11px; color: #fff; text-transform: uppercase; letter-spacing: 0.05em; pointer-events: none; }
+.handle { position: absolute; right: -7px; bottom: -7px; width: 14px; height: 14px; background: #fff; border: 2px solid #7c5cff; border-radius: 3px; cursor: nwse-resize; }
+.box.bottom .handle { border-color: #2dd4bf; }

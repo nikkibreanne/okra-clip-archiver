@@ -5,3 +5,4 @@
 *.mkv
 /web/node_modules
 /web/dist
+/layout.json

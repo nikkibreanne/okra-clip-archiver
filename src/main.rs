@@ -4,6 +4,7 @@
 //!   serve      launch the web portal (opens your browser)
 
 mod firebase;
+mod layout;
 mod pipeline;
 mod planner;
 mod server;
